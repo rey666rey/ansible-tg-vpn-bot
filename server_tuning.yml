@@ -46,9 +46,10 @@
     xui_panel_key_file: "/root/cert/{{ xui_panel_domain }}/privkey.pem"
 
     xui_manage_inbounds: "{{ lookup('ansible.builtin.env', 'XUI_MANAGE_INBOUNDS') | default('true', true) }}"
+    xui_reality_self_test: "{{ lookup('ansible.builtin.env', 'XUI_REALITY_SELF_TEST') | default('true', true) }}"
     xui_reality_port: 8443
-    xui_reality_target: www.microsoft.com:443
-    xui_reality_server_name: www.microsoft.com
+    xui_reality_target: "{{ lookup('ansible.builtin.env', 'XUI_REALITY_TARGET') | default('www.microsoft.com:443', true) }}"
+    xui_reality_server_name: "{{ lookup('ansible.builtin.env', 'XUI_REALITY_SERVER_NAME') | default('www.microsoft.com', true) }}"
     xui_xhttp_port: 443
     xui_xhttp_path: /xhttp
     xui_hysteria_port: 443
@@ -626,6 +627,7 @@
                   "id": client_id,
                   "flow": flow,
                   "email": email,
+                  "level": 0,
                   "limitIp": 0,
                   "totalGB": 0,
                   "expiryTime": 0,
@@ -678,6 +680,7 @@
           def validate_inbound_payloads(inbounds):
               for inbound in inbounds:
                   stream = json.loads(inbound["stream_settings"])
+                  settings = json.loads(inbound["settings"])
                   protocol = inbound["protocol"]
                   tag = inbound["tag"]
                   if protocol == "vless" and stream.get("security") == "reality":
@@ -694,6 +697,8 @@
                           raise RuntimeError(f"{tag} misses realitySettings.shortIds")
                       if not reality.get("serverNames"):
                           raise RuntimeError(f"{tag} misses realitySettings.serverNames")
+                      if not (settings.get("clients") or settings.get("users")):
+                          raise RuntimeError(f"{tag} misses vless clients/users")
                   if protocol == "vless" and stream.get("network") == "xhttp":
                       xhttp = stream.get("xhttpSettings") or {}
                       tls = stream.get("tlsSettings") or {}
@@ -836,12 +841,22 @@
                               "clients": [
                                   client("reality", data["reality_client_id"], data["reality_sub_id"], "xtls-rprx-vision")
                               ],
+                              "users": [
+                                  {
+                                      "id": data["reality_client_id"],
+                                      "flow": "xtls-rprx-vision",
+                                      "email": "reality",
+                                      "level": 0,
+                                  }
+                              ],
                               "decryption": "none",
                               "fallbacks": [],
                           }, separators=(",", ":")),
                           "stream_settings": json.dumps({
+                              "method": "raw",
                               "network": "tcp",
                               "security": "reality",
+                              "rawSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
                               "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
                               "realitySettings": {
                                   "show": False,
@@ -962,8 +977,283 @@
       notify: restart x-ui
       when: xui_manage_inbounds | bool
 
+    - name: install 3x-ui inbound runtime checker
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/check-3x-ui-inbounds.py
+        owner: root
+        group: root
+        mode: '0700'
+        content: |
+          #!/usr/bin/env python3
+          import contextlib
+          import json
+          import os
+          import pathlib
+          import socket
+          import sqlite3
+          import subprocess
+          import tempfile
+          import time
+
+          db_path = pathlib.Path("/etc/x-ui/x-ui.db")
+          runtime_config_path = pathlib.Path("/usr/local/x-ui/bin/config.json")
+          xray_dir = pathlib.Path("/usr/local/x-ui")
+          xray_path = xray_dir / "bin/xray-linux-amd64"
+
+          managed_tags = (
+              "in-vless-reality-8443",
+              "in-vless-xhttp-tls-443",
+              "in-hysteria2-443",
+          )
+
+          def load_json(raw):
+              if isinstance(raw, dict):
+                  return raw
+              if not raw:
+                  return {}
+              return json.loads(raw)
+
+          def load_db_inbounds():
+              conn = sqlite3.connect(db_path)
+              conn.row_factory = sqlite3.Row
+              rows = {}
+              for row in conn.execute(
+                  "SELECT remark, tag, port, protocol, enable, settings, stream_settings "
+                  "FROM inbounds"
+              ):
+                  data = dict(row)
+                  data["settings"] = load_json(data.get("settings"))
+                  data["stream_settings"] = load_json(data.get("stream_settings"))
+                  key = data.get("tag") or data.get("remark")
+                  if key:
+                      rows[key] = data
+              return rows
+
+          def load_runtime_inbounds():
+              if not runtime_config_path.exists():
+                  raise RuntimeError(f"{runtime_config_path} was not generated")
+              data = json.loads(runtime_config_path.read_text(encoding="utf-8"))
+              rows = {}
+              for inbound in data.get("inbounds") or []:
+                  if not isinstance(inbound, dict):
+                      continue
+                  key = inbound.get("tag")
+                  if key:
+                      rows[key] = inbound
+              return rows
+
+          def client_emails(settings):
+              items = settings.get("clients")
+              if not isinstance(items, list) or not items:
+                  items = settings.get("users")
+              if not isinstance(items, list):
+                  return set()
+              return {
+                  str(item.get("email") or "").strip()
+                  for item in items
+                  if isinstance(item, dict) and str(item.get("email") or "").strip()
+              }
+
+          def assert_runtime_matches_db(db_rows, runtime_rows):
+              problems = []
+              for tag in managed_tags:
+                  db_row = db_rows.get(tag)
+                  runtime_row = runtime_rows.get(tag)
+                  if not db_row:
+                      problems.append(f"{tag}: missing in sqlite")
+                      continue
+                  if not runtime_row:
+                      problems.append(f"{tag}: missing in runtime config")
+                      continue
+
+                  db_clients = client_emails(db_row["settings"])
+                  runtime_clients = client_emails(runtime_row.get("settings") or {})
+                  missing = sorted(db_clients - runtime_clients)
+                  if missing:
+                      problems.append(
+                          f"{tag}: runtime misses clients from sqlite: {', '.join(missing)}"
+                      )
+
+              if problems:
+                  raise RuntimeError("; ".join(problems))
+
+          def free_local_port():
+              with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+                  sock.bind(("127.0.0.1", 0))
+                  return sock.getsockname()[1]
+
+          def wait_for_port(port, timeout=5.0):
+              deadline = time.time() + timeout
+              while time.time() < deadline:
+                  with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+                      sock.settimeout(0.3)
+                      if sock.connect_ex(("127.0.0.1", port)) == 0:
+                          return
+                  time.sleep(0.1)
+              raise RuntimeError(f"temporary xray socks port {port} did not open")
+
+          def tail(path, limit=80):
+              if not path.exists():
+                  return ""
+              return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:])
+
+          def reality_self_test(db_rows):
+              if os.environ.get("XUI_REALITY_SELF_TEST", "true").strip().lower() in {"0", "false", "no", "off"}:
+                  print("reality self-test skipped by XUI_REALITY_SELF_TEST=false")
+                  return
+
+              if not xray_path.exists():
+                  raise RuntimeError(f"{xray_path} was not found")
+
+              row = db_rows.get("in-vless-reality-8443")
+              if not row:
+                  raise RuntimeError("reality inbound is missing in sqlite")
+
+              settings = row["settings"]
+              stream = row["stream_settings"]
+              clients = settings.get("clients")
+              if not isinstance(clients, list) or not clients:
+                  raise RuntimeError("reality inbound has no clients")
+              client = next((item for item in clients if item.get("enable", True)), clients[0])
+
+              reality = stream.get("realitySettings") or {}
+              reality_client = reality.get("settings") or {}
+              server_names = reality.get("serverNames") or []
+              short_ids = reality.get("shortIds") or []
+              if not server_names or not short_ids or not reality_client.get("publicKey"):
+                  raise RuntimeError("reality inbound misses serverNames, shortIds or publicKey")
+
+              socks_port = free_local_port()
+              log_file = pathlib.Path(tempfile.mkstemp(prefix="xui-reality-check-", suffix=".log")[1])
+              config_file = pathlib.Path(tempfile.mkstemp(prefix="xui-reality-check-", suffix=".json")[1])
+              config = {
+                  "log": {"loglevel": "debug"},
+                  "inbounds": [
+                      {
+                          "listen": "127.0.0.1",
+                          "port": socks_port,
+                          "protocol": "socks",
+                          "settings": {"auth": "noauth", "udp": False},
+                      }
+                  ],
+                  "outbounds": [
+                      {
+                          "protocol": "vless",
+                          "settings": {
+                              "vnext": [
+                                  {
+                                      "address": "127.0.0.1",
+                                      "port": int(row["port"]),
+                                      "users": [
+                                          {
+                                              "id": client["id"],
+                                              "encryption": "none",
+                                              "flow": client.get("flow") or "xtls-rprx-vision",
+                                          }
+                                      ],
+                                  }
+                              ]
+                          },
+                          "streamSettings": {
+                              "network": "tcp",
+                              "security": "reality",
+                              "realitySettings": {
+                                  "serverName": server_names[0],
+                                  "fingerprint": reality_client.get("fingerprint") or "chrome",
+                                  "publicKey": reality_client["publicKey"],
+                                  "shortId": short_ids[0],
+                                  "spiderX": reality_client.get("spiderX") or "/",
+                              },
+                          },
+                      }
+                  ],
+              }
+              config_file.write_text(json.dumps(config), encoding="utf-8")
+
+              proc = None
+              try:
+                  with log_file.open("w", encoding="utf-8") as log:
+                      proc = subprocess.Popen(
+                          [str(xray_path), "run", "-config", str(config_file)],
+                          cwd=str(xray_dir),
+                          stdout=log,
+                          stderr=subprocess.STDOUT,
+                      )
+                  wait_for_port(socks_port)
+                  curl = subprocess.run(
+                      [
+                          "curl",
+                          "-fsS",
+                          "--max-time",
+                          "12",
+                          "--socks5-hostname",
+                          f"127.0.0.1:{socks_port}",
+                          "https://www.cloudflare.com/cdn-cgi/trace",
+                      ],
+                      text=True,
+                      capture_output=True,
+                      check=False,
+                  )
+                  if curl.returncode != 0:
+                      raise RuntimeError(
+                          "reality self-test failed: "
+                          f"curl rc={curl.returncode}; stderr={curl.stderr.strip()}; "
+                          f"xray log tail:\n{tail(log_file)}"
+                      )
+                  if "ip=" not in curl.stdout:
+                      raise RuntimeError(f"reality self-test returned unexpected body: {curl.stdout[:200]}")
+              finally:
+                  if proc and proc.poll() is None:
+                      proc.terminate()
+                      try:
+                          proc.wait(timeout=3)
+                      except subprocess.TimeoutExpired:
+                          proc.kill()
+                  for path in (config_file, log_file):
+                      with contextlib.suppress(FileNotFoundError):
+                          path.unlink()
+
+          def main():
+              db_rows = load_db_inbounds()
+              runtime_rows = load_runtime_inbounds()
+              assert_runtime_matches_db(db_rows, runtime_rows)
+              reality_self_test(db_rows)
+              print("3x-ui inbound runtime check passed")
+
+          if __name__ == "__main__":
+              main()
+      when: xui_manage_inbounds | bool
+
     - name: apply service and sysctl handlers before firewall
       ansible.builtin.meta: flush_handlers
+
+    - name: wait for 3x-ui panel port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ xui_panel_port }}"
+        timeout: 30
+      when: xui_manage_inbounds | bool
+
+    - name: wait for 3x-ui subscription port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ xui_subscription_port }}"
+        timeout: 30
+      when: xui_manage_inbounds | bool
+
+    - name: wait for 3x-ui reality port
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ xui_reality_port }}"
+        timeout: 30
+      when: xui_manage_inbounds | bool
+
+    - name: verify 3x-ui inbounds are active and usable
+      ansible.builtin.command: /usr/local/sbin/check-3x-ui-inbounds.py
+      environment:
+        XUI_REALITY_SELF_TEST: "{{ xui_reality_self_test }}"
+      changed_when: false
+      when: xui_manage_inbounds | bool
 
     - name: enable ufw after services and rules are ready
       ansible.builtin.command: ufw --force enable

@@ -67,6 +67,9 @@ XUI_PANEL_PORT=24444
 XUI_SUBSCRIPTION_PORT=2096
 XUI_SUBSCRIPTION_PATH=/subrey/
 XUI_CLASH_SUBSCRIPTION_PATH=/clashrey/
+XUI_REALITY_TARGET=www.microsoft.com:443
+XUI_REALITY_SERVER_NAME=www.microsoft.com
+XUI_REALITY_SELF_TEST=true
 XUI_ACME_EMAIL=mail@example.com
 XUI_MANAGE_INBOUNDS=true
 ```
@@ -215,6 +218,9 @@ SERVER_SSH_PRIVATE_KEY_FILE=./rey_server_ed25519
 | `XUI_SUBSCRIPTION_PORT` | Порт подписок. По умолчанию `2096`. |
 | `XUI_SUBSCRIPTION_PATH` | Путь обычной подписки. По умолчанию `/subrey/`. |
 | `XUI_CLASH_SUBSCRIPTION_PATH` | Путь Clash/Mihomo подписки. По умолчанию `/clashrey/`. |
+| `XUI_REALITY_TARGET` | TLS-сайт для маскировки Reality, например `www.microsoft.com:443`. |
+| `XUI_REALITY_SERVER_NAME` | SNI для Reality. Обычно домен из `XUI_REALITY_TARGET` без порта. |
+| `XUI_REALITY_SELF_TEST` | После раскатки запускать настоящий локальный xray-клиент через Reality. По умолчанию `true`. |
 | `XUI_ACME_EMAIL` | Email для ACME/Let's Encrypt. Можно оставить пустым, но лучше указать. |
 | `XUI_MANAGE_INBOUNDS` | Создавать TLS inbound-ы и выпускать сертификат. По умолчанию `true`. |
 
@@ -230,6 +236,8 @@ SERVER_SSH_PRIVATE_KEY_FILE=./rey_server_ed25519
 | `xui_subscription_path` | `/subrey/` |
 | `xui_clash_subscription_path` | `/clashrey/` |
 | `xui_reality_port` | `8443` |
+| `xui_reality_target` | `www.microsoft.com:443` |
+| `xui_reality_server_name` | `www.microsoft.com` |
 | `xui_xhttp_port` | `443` |
 | `xui_hysteria_port` | `443/udp` |
 
@@ -265,6 +273,19 @@ sudo ufw status
 sudo systemctl status x-ui
 ```
 
+Проверить, что 3x-ui реально применил inbound-ы в runtime и Reality пропускает
+трафик, можно тем же скриптом, который запускает playbook:
+
+```bash
+sudo /usr/local/sbin/check-3x-ui-inbounds.py
+```
+
+Если эта проверка падает на `reality self-test failed`, значит порт может быть
+открыт и подписка может генериться, но настоящий VLESS Reality handshake не
+проходит. Это специально считается ошибкой раскатки. Временно пропустить только
+эту проверку можно через `XUI_REALITY_SELF_TEST=false`, но лучше сначала поменять
+`XUI_REALITY_TARGET`/`XUI_REALITY_SERVER_NAME` или версию core.
+
 Проверить API token:
 
 ```bash
@@ -294,6 +315,11 @@ panel_domain=reyreyrey.space
 
 Кнопка `🗑 удалить пользователя` только удаляет клиента из всех inbound-ов на всех
 серверах из sqlite и чистит локальную запись клиента в базе бота.
+
+Кнопка `🧨 удалить сервер` удаляет сервер из sqlite бота вместе с локальными
+записями клиентов этого сервера. Сам VPS она не трогает. Используй ее перед
+повторной раскаткой после reinstall VPS: у переустановленного сервера меняется
+SSH host key, а старый xui token из базы уже невалиден.
 
 Проверить Fail2Ban:
 

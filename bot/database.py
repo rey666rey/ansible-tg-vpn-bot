@@ -329,6 +329,33 @@ class ServerRepository:
             )
             return int(cursor.rowcount)
 
+    def delete_server(self, value: str) -> tuple[Server | None, int]:
+        server = self.get(value)
+        if server is None:
+            return None, 0
+
+        hosts = {
+            server.host,
+            server.panel_host or "",
+            server.subscription_host or "",
+        }
+        hosts = {host for host in hosts if host}
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM servers WHERE id = ?", (server.id,))
+            deleted_servers = int(cursor.rowcount)
+            deleted_clients = 0
+            if hosts:
+                placeholders = ", ".join(["?"] * len(hosts))
+                client_cursor = conn.execute(
+                    f"DELETE FROM clients WHERE server_host IN ({placeholders})",
+                    tuple(hosts),
+                )
+                deleted_clients = int(client_cursor.rowcount)
+
+        if not deleted_servers:
+            return None, 0
+        return server, deleted_clients
+
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute("PRAGMA table_info(servers)").fetchall()
         columns = {str(row["name"]) for row in rows}

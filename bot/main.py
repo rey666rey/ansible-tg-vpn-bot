@@ -26,12 +26,14 @@ if __package__ in {None, ""}:
         BACKUP_BUTTON,
         CHECK_SERVERS_BUTTON,
         CLIENTS_BUTTON,
+        DELETE_SERVER_BUTTON,
         DELETE_USER_BUTTON,
         GET_SUBSCRIPTION_BUTTON,
         ROLLOUT_BUTTON,
         SERVERS_BUTTON,
         main_keyboard,
         rollout_keyboard,
+        server_delete_keyboard,
         subscription_keyboard,
     )
     from bot.middlewares import OwnerOnlyMiddleware
@@ -46,12 +48,14 @@ else:
         BACKUP_BUTTON,
         CHECK_SERVERS_BUTTON,
         CLIENTS_BUTTON,
+        DELETE_SERVER_BUTTON,
         DELETE_USER_BUTTON,
         GET_SUBSCRIPTION_BUTTON,
         ROLLOUT_BUTTON,
         SERVERS_BUTTON,
         main_keyboard,
         rollout_keyboard,
+        server_delete_keyboard,
         subscription_keyboard,
     )
     from .middlewares import OwnerOnlyMiddleware
@@ -71,6 +75,10 @@ class SubscriptionStates(StatesGroup):
 
 
 class DeleteUserStates(StatesGroup):
+    waiting_payload = State()
+
+
+class DeleteServerStates(StatesGroup):
     waiting_payload = State()
 
 
@@ -134,17 +142,10 @@ async def servers_button(
         )
         return
 
-    lines = ["🖥 серверы в базе:"]
-    for server in servers:
-        token = "🔐 token есть" if server.xui_api_token else "🕳 token нет"
-        panel_host = server.panel_host or server.host
-        subscription_host = server.subscription_host or server.host
-        panel_base_path = server.panel_base_path or settings.xui_panel_base_path or "/rey"
-        lines.append(
-            f"{server.id}. <b>{html.escape(subscription_host)}</b> · {token}\n"
-            f"   панель: <code>{html.escape(panel_host)}{html.escape(panel_base_path)}</code>"
-        )
-    await message.answer("\n".join(lines), reply_markup=main_keyboard())
+    await message.answer(
+        _format_servers_list(servers, settings),
+        reply_markup=main_keyboard(),
+    )
 
 
 @router.message(F.text.in_({CHECK_SERVERS_BUTTON, "проверить серверы"}))
@@ -267,6 +268,32 @@ async def delete_user_button(
         "<code>client-name</code>"
         f"{servers_text}",
         reply_markup=subscription_keyboard(),
+    )
+
+
+@router.message(F.text.in_({DELETE_SERVER_BUTTON, "удалить сервер"}))
+async def delete_server_button(
+    message: Message,
+    state: FSMContext,
+    server_repository: ServerRepository,
+    settings: Settings,
+) -> None:
+    await state.set_state(DeleteServerStates.waiting_payload)
+    servers = server_repository.list()
+    servers_text = (
+        "\n\n" + _format_servers_list(servers, settings)
+        if servers
+        else "\n\n🫙 серверов в базе пока нет."
+    )
+    await message.answer(
+        "🧨 пришли id или домен сервера, который надо забыть в sqlite.\n"
+        "это удалит xui token и локальные записи клиентов этого сервера, "
+        "но не тронет сам vps:\n"
+        "<code>1</code>\n"
+        "или\n"
+        "<code>fr.reyreyrey.space</code>"
+        f"{servers_text}",
+        reply_markup=server_delete_keyboard(),
     )
 
 
@@ -471,6 +498,46 @@ async def delete_user_payload(
     )
 
 
+@router.message(DeleteServerStates.waiting_payload)
+async def delete_server_payload(
+    message: Message,
+    state: FSMContext,
+    server_repository: ServerRepository,
+) -> None:
+    if message.text in {BACK_BUTTON, "назад"}:
+        await back_to_home(message, state)
+        return
+
+    value = (message.text or "").strip()
+    if not value:
+        await message.answer("пришли id или домен сервера.", reply_markup=server_delete_keyboard())
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        logging.info("Could not delete delete-server payload message", exc_info=True)
+
+    server, deleted_clients = server_repository.delete_server(value)
+    await state.clear()
+    if server is None:
+        await message.answer(
+            "🫙 не нашла такой сервер в sqlite.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    await message.answer(
+        "🧨 сервер забыт в sqlite.\n"
+        f"host: <code>{html.escape(server.host)}</code>\n"
+        f"panel: <code>{html.escape(server.panel_host or server.host)}</code>\n"
+        f"sub: <code>{html.escape(server.subscription_host or server.host)}</code>\n"
+        f"локальных записей клиентов удалено: <code>{deleted_clients}</code>\n\n"
+        "если vps переустановлен, теперь можно раскатывать его заново.",
+        reply_markup=main_keyboard(),
+    )
+
+
 @router.message()
 async def fallback(message: Message) -> None:
     await message.answer(
@@ -591,6 +658,20 @@ def _format_delete_user_message(client_name: str, results: list, deleted_local: 
         f"sqlite-записей удалено: <code>{deleted_local}</code>"
     )
     return "\n\n".join([header, *blocks])
+
+
+def _format_servers_list(servers: list, settings: Settings) -> str:
+    lines = ["🖥 серверы в базе:"]
+    for server in servers:
+        token = "🔐 token есть" if server.xui_api_token else "🕳 token нет"
+        panel_host = server.panel_host or server.host
+        subscription_host = server.subscription_host or server.host
+        panel_base_path = server.panel_base_path or settings.xui_panel_base_path or "/rey"
+        lines.append(
+            f"{server.id}. <b>{html.escape(subscription_host)}</b> · {token}\n"
+            f"   панель: <code>{html.escape(panel_host)}{html.escape(panel_base_path)}</code>"
+        )
+    return "\n".join(lines)
 
 
 def _subscription_host(subscription_url: str, fallback: str) -> str:

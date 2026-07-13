@@ -4,6 +4,7 @@ from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 ROLLOUT_BUTTON = "💎 раскатать сервер"
 GET_SUBSCRIPTION_BUTTON = "✨ добавить пользователя"
 DELETE_USER_BUTTON = "🗑 удалить пользователя"
+DELETE_SERVER_BUTTON = "🧨 удалить сервер"
 SERVERS_BUTTON = "🖥 серверы"
 CHECK_SERVERS_BUTTON = "🩺 проверить серверы"
 CLIENTS_BUTTON = "👥 клиенты"
@@ -18,6 +19,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=GET_SUBSCRIPTION_BUTTON)],
             [KeyboardButton(text=DELETE_USER_BUTTON)],
             [KeyboardButton(text=SERVERS_BUTTON), KeyboardButton(text=CHECK_SERVERS_BUTTON)],
+            [KeyboardButton(text=DELETE_SERVER_BUTTON)],
             [KeyboardButton(text=CLIENTS_BUTTON), KeyboardButton(text=BACKUP_BUTTON)],
         ],
         resize_keyboard=True,
@@ -38,4 +40,12 @@ def subscription_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text=BACK_BUTTON)]],
         resize_keyboard=True,
         input_field_placeholder="пришли имя клиента ✨",
+    )
+
+
+def server_delete_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=BACK_BUTTON)]],
+        resize_keyboard=True,
+        input_field_placeholder="пришли id или домен сервера 🧨",
     )
