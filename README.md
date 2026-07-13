@@ -253,6 +253,96 @@ curl -H "Authorization: Bearer XUI_API_TOKEN" \
 sudo systemctl status fail2ban
 ```
 
+## запуск telegram-бота как systemd-службы
+
+Пример unit-файла лежит в `systemd/server-tg-bot.service`.
+
+По умолчанию он ожидает:
+
+- проект в `/opt/server-tg-bot`;
+- виртуальное окружение в `/opt/server-tg-bot/.venv`;
+- `.env` в `/opt/server-tg-bot/.env`;
+- запуск от пользователя `rey`.
+
+Если путь или пользователь другие, сначала поправь `User`, `Group`, `WorkingDirectory`,
+`EnvironmentFile` и `ExecStart` в `systemd/server-tg-bot.service`.
+
+### первичная установка
+
+На сервере, где будет крутиться бот:
+
+```bash
+sudo mkdir -p /opt/server-tg-bot
+sudo rsync -a \
+  --exclude .git \
+  --exclude .venv \
+  --exclude data \
+  --exclude .env \
+  ./ /opt/server-tg-bot/
+sudo chown -R rey:rey /opt/server-tg-bot
+```
+
+Создай venv и поставь зависимости:
+
+```bash
+cd /opt/server-tg-bot
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Создай локальный `.env` и заполни секреты:
+
+```bash
+cp .env.example .env
+nano .env
+chmod 600 .env
+```
+
+Минимально нужны `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_IDS`,
+`ADMIN_USER_PASSWORD` и `XUI_PASSWORD`.
+
+Поставь службу:
+
+```bash
+sudo cp /opt/server-tg-bot/systemd/server-tg-bot.service /etc/systemd/system/server-tg-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now server-tg-bot
+```
+
+Проверить статус:
+
+```bash
+sudo systemctl status server-tg-bot
+```
+
+Смотреть логи:
+
+```bash
+journalctl -u server-tg-bot -f
+```
+
+Перезапустить после изменения кода или `.env`:
+
+```bash
+sudo systemctl restart server-tg-bot
+```
+
+Остановить:
+
+```bash
+sudo systemctl stop server-tg-bot
+```
+
+### обновление кода
+
+После pull/rsync нового кода:
+
+```bash
+cd /opt/server-tg-bot
+.venv/bin/pip install -r requirements.txt
+sudo systemctl restart server-tg-bot
+```
+
 ## Частые проблемы
 
 ### `Missing .env`

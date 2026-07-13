@@ -1,0 +1,22 @@
+[Unit]
+Description=server tg bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rey
+Group=rey
+WorkingDirectory=/opt/server-tg-bot
+EnvironmentFile=/opt/server-tg-bot/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/opt/server-tg-bot/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/server-tg-bot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
