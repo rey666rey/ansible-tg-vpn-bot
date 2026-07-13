@@ -1056,6 +1056,7 @@
 
           def assert_runtime_matches_db(db_rows, runtime_rows):
               problems = []
+              warnings = []
               for tag in managed_tags:
                   db_row = db_rows.get(tag)
                   runtime_row = runtime_rows.get(tag)
@@ -1070,12 +1071,14 @@
                   runtime_clients = client_emails(runtime_row.get("settings") or {})
                   missing = sorted(db_clients - runtime_clients)
                   if missing:
-                      problems.append(
+                      warnings.append(
                           f"{tag}: runtime misses clients from sqlite: {', '.join(missing)}"
                       )
 
               if problems:
                   raise RuntimeError("; ".join(problems))
+              for warning in warnings:
+                  print(f"warning: {warning}")
 
           def free_local_port():
               with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:

@@ -147,6 +147,10 @@ class RolloutRunner:
                                             "ansible_user": request.user,
                                             "ansible_port": 22,
                                             "ansible_password": request.password,
+                                            "ansible_ssh_common_args": (
+                                                "-o StrictHostKeyChecking=no "
+                                                "-o UserKnownHostsFile=/dev/null"
+                                            ),
                                         }
                                     },
                                     "vars": {
@@ -167,7 +171,7 @@ class RolloutRunner:
             env = os.environ.copy()
             if not env.get("ANSIBLE_LOCAL_TEMP") or env["ANSIBLE_LOCAL_TEMP"].startswith("/private/"):
                 env["ANSIBLE_LOCAL_TEMP"] = "/tmp/ansible-local"
-            env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
+            env["ANSIBLE_HOST_KEY_CHECKING"] = "False"
             env["XUI_TLS_DOMAIN"] = request.domain
             if request.panel_domain:
                 env["XUI_PANEL_DOMAIN"] = request.panel_domain
@@ -224,16 +228,17 @@ def _tail(raw: bytes, limit: int = 3500) -> str:
 
 def classify_rollout_failure(stdout_tail: str, stderr_tail: str) -> str | None:
     text = f"{stdout_tail}\n{stderr_tail}".lower()
+    if "remote host identification has changed" in text or "offending" in text and "known_hosts" in text:
+        return (
+            "ssh host key изменился. такое нормально после reinstall vps. "
+            "если это ручной запуск, удали старый ключ командой ssh-keygen -R <ip>. "
+            "для раскатки через бота мы используем временный known_hosts, так что обнови код "
+            "и перезапусти службу бота."
+        )
     if "invalid/incorrect password" in text or "permission denied" in text:
         return (
             "ssh не пустил на сервер: неверный user/password или root-login уже отключен. "
             "после reinstall обычно нужно указать user=root и новый root password от провайдера."
-        )
-    if "remote host identification has changed" in text or "offending" in text and "known_hosts" in text:
-        return (
-            "ssh host key изменился. такое нормально после reinstall vps. "
-            "удали старый ключ командой ssh-keygen -R <ip> на машине, где крутится бот, "
-            "или зайди в боте в 🧨 удалить сервер и раскатай заново."
         )
     if "using a ssh password instead of a key is not possible" in text:
         return (

@@ -481,6 +481,15 @@ panel_domain=reyreyrey.space
 Если в боте уже был старый сервер, сначала нажми `🧨 удалить сервер`, чтобы
 убрать старый xui token и локальные записи из sqlite.
 
+Раскатка, запущенная именно через Telegram-бота, использует временный SSH
+known_hosts (`UserKnownHostsFile=/dev/null`) и `StrictHostKeyChecking=no`, поэтому
+старый ключ после reinstall не должен ломать bootstrap. Для ручного запуска
+`./run-playbook.sh` старый ключ можно убрать так:
+
+```bash
+ssh-keygen -f ~/.ssh/known_hosts -R 203.0.113.10
+```
+
 ### Unable to create local directories(/private/tmp/ansible-local)
 
 Это macos-путь, который не подходит для ubuntu. В `.env` убери старую строку
