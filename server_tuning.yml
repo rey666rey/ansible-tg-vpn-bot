@@ -685,6 +685,8 @@
                       for field in ("privateKey",):
                           if not reality.get(field):
                               raise RuntimeError(f"{tag} misses realitySettings.{field}")
+                      if not (reality.get("dest") or reality.get("target")):
+                          raise RuntimeError(f"{tag} misses realitySettings.dest")
                       reality_client = reality.get("settings") or {}
                       if not reality_client.get("publicKey"):
                           raise RuntimeError(f"{tag} misses realitySettings.settings.publicKey")
@@ -843,6 +845,7 @@
                               "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
                               "realitySettings": {
                                   "show": False,
+                                  "dest": env["XUI_REALITY_TARGET"],
                                   "target": env["XUI_REALITY_TARGET"],
                                   "xver": 0,
                                   "serverNames": [env["XUI_REALITY_SERVER_NAME"]],

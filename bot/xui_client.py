@@ -617,10 +617,11 @@ class XuiClientService:
         else:
             details.append("managed inbound-ы на месте")
 
+        details.extend(_inspect_managed_inbounds(rows))
         details.append(f"api token: {server.xui_api_token_name or 'без имени'}")
         return XuiServerCheckResult(
             server=server,
-            ok=not missing,
+            ok=not missing and not _has_bad_inbound_detail(details),
             details=tuple(details),
         )
 
@@ -1133,6 +1134,77 @@ def _loads_json_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _inspect_managed_inbounds(rows: list[Any]) -> tuple[str, ...]:
+    by_tag_or_remark: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in (row.get("tag"), row.get("remark")):
+            name = str(key or "").strip()
+            if name:
+                by_tag_or_remark[name] = row
+
+    details: list[str] = []
+    reality = (
+        by_tag_or_remark.get("in-vless-reality-8443")
+        or by_tag_or_remark.get("vless-reality-8443")
+    )
+    if reality:
+        details.append(_inspect_reality_inbound(reality))
+
+    return tuple(details)
+
+
+def _inspect_reality_inbound(row: dict[str, Any]) -> str:
+    problems: list[str] = []
+    protocol = str(row.get("protocol") or "").strip()
+    if protocol != "vless":
+        problems.append(f"protocol={protocol or 'пусто'}")
+
+    stream = _loads_json_object(row.get("streamSettings") or row.get("stream_settings"))
+    if stream.get("network") != "tcp":
+        problems.append(f"network={stream.get('network') or 'пусто'}")
+    if stream.get("security") != "reality":
+        problems.append(f"security={stream.get('security') or 'пусто'}")
+
+    reality = stream.get("realitySettings")
+    if not isinstance(reality, dict):
+        problems.append("нет realitySettings")
+        reality = {}
+
+    if not reality.get("privateKey"):
+        problems.append("нет privateKey")
+    if not (reality.get("dest") or reality.get("target")):
+        problems.append("нет dest")
+
+    reality_client = reality.get("settings")
+    if not isinstance(reality_client, dict):
+        reality_client = {}
+    if not reality_client.get("publicKey"):
+        problems.append("нет publicKey для mihomo")
+    if not _non_empty_list(reality.get("serverNames")):
+        problems.append("нет serverNames")
+    if not _non_empty_list(reality.get("shortIds")):
+        problems.append("нет shortIds")
+
+    settings = _loads_json_object(row.get("settings"))
+    clients = settings.get("clients")
+    if not isinstance(clients, list) or not clients:
+        problems.append("нет клиентов")
+
+    if problems:
+        return "reality: " + ", ".join(problems)
+    return "reality: ok"
+
+
+def _non_empty_list(value: Any) -> bool:
+    return isinstance(value, list) and any(str(item or "").strip() for item in value)
+
+
+def _has_bad_inbound_detail(details: list[str]) -> bool:
+    return any(detail.startswith("reality: ") and detail != "reality: ok" for detail in details)
 
 
 def _api_url(panel_url: str, api_path: str) -> str:
