@@ -28,7 +28,6 @@ if __package__ in {None, ""}:
         CLIENTS_BUTTON,
         DELETE_USER_BUTTON,
         GET_SUBSCRIPTION_BUTTON,
-        RECREATE_USER_BUTTON,
         ROLLOUT_BUTTON,
         SERVERS_BUTTON,
         main_keyboard,
@@ -49,7 +48,6 @@ else:
         CLIENTS_BUTTON,
         DELETE_USER_BUTTON,
         GET_SUBSCRIPTION_BUTTON,
-        RECREATE_USER_BUTTON,
         ROLLOUT_BUTTON,
         SERVERS_BUTTON,
         main_keyboard,
@@ -69,10 +67,6 @@ class RolloutStates(StatesGroup):
 
 
 class SubscriptionStates(StatesGroup):
-    waiting_payload = State()
-
-
-class RecreateUserStates(StatesGroup):
     waiting_payload = State()
 
 
@@ -251,36 +245,6 @@ async def subscription_button(
     )
 
 
-@router.message(F.text.in_({RECREATE_USER_BUTTON, "пересоздать пользователя", "удалить и добавить снова"}))
-async def recreate_user_button(
-    message: Message,
-    state: FSMContext,
-    server_repository: ServerRepository,
-) -> None:
-    await state.set_state(RecreateUserStates.waiting_payload)
-    servers = server_repository.list()
-    server_lines = "\n".join(
-        f"{server.id}. {html.escape(server.subscription_host or server.host)}"
-        for server in servers
-    )
-    servers_text = (
-        f"\n\n🖥 серверы в базе:\n<code>{server_lines}</code>"
-        if server_lines
-        else "\n\n🫙 серверов в базе пока нет."
-    )
-    await message.answer(
-        "♻️ пришли имя клиента. я удалю его на всех серверах, "
-        "создам заново и верну новые сабки с новой кракозяброй:\n"
-        "<code>client-name</code>\n\n"
-        "или так, если нужны параметры:\n"
-        "<code>client=client-name\n"
-        "days=30\n"
-        "gb=100</code>"
-        f"{servers_text}",
-        reply_markup=subscription_keyboard(),
-    )
-
-
 @router.message(F.text.in_({DELETE_USER_BUTTON, "удалить пользователя"}))
 async def delete_user_button(
     message: Message,
@@ -454,69 +418,6 @@ async def subscription_payload(
         )
     for index, text in enumerate(
         _format_bulk_subscription_messages(request.client_name, results),
-        start=1,
-    ):
-        await status_message.answer(
-            text,
-            reply_markup=main_keyboard() if index == 1 else None,
-        )
-
-
-@router.message(RecreateUserStates.waiting_payload)
-async def recreate_user_payload(
-    message: Message,
-    state: FSMContext,
-    xui_client_service: XuiClientService,
-    server_repository: ServerRepository,
-) -> None:
-    if message.text in {BACK_BUTTON, "назад"}:
-        await back_to_home(message, state)
-        return
-
-    try:
-        request = parse_bulk_subscription_message(message.text or "")
-    except ValueError as exc:
-        await message.answer(str(exc), reply_markup=subscription_keyboard())
-        return
-
-    try:
-        await message.delete()
-    except Exception:
-        logging.info("Could not delete recreate payload message", exc_info=True)
-
-    status_message = await message.answer(
-        f"♻️ пересоздаю <code>{html.escape(request.client_name)}</code> на всех серверах.",
-        reply_markup=subscription_keyboard(),
-    )
-
-    try:
-        results = await xui_client_service.recreate_client_subscription_on_all_servers(request)
-    except XuiApiError as exc:
-        await status_message.answer(
-            "🚨 не смог пересоздать клиента:\n"
-            f"<pre>{html.escape(str(exc))}</pre>",
-            reply_markup=subscription_keyboard(),
-        )
-        return
-
-    await state.clear()
-    server_repository.delete_client_records(request.client_name)
-    for item in results:
-        if item.result is None:
-            continue
-        server_repository.save_client(
-            name=item.result.client_name,
-            server_host=item.server.subscription_host or item.server.host,
-            subscription_url=item.result.subscription_url,
-            clash_subscription_url=item.result.clash_subscription_url,
-        )
-
-    for index, text in enumerate(
-        _format_bulk_subscription_messages(
-            request.client_name,
-            results,
-            header_action="пересоздано",
-        ),
         start=1,
     ):
         await status_message.answer(

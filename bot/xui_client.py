@@ -420,20 +420,6 @@ class XuiClientService:
         ]
         return await asyncio.gather(*tasks)
 
-    async def recreate_client_subscription_on_all_servers(
-        self,
-        request: XuiBulkSubscriptionRequest,
-    ) -> list[XuiServerSubscriptionResult]:
-        servers = self.server_repository.list()
-        if not servers:
-            raise XuiApiError("в базе пока нет серверов. сначала раскатай сервер.")
-
-        tasks = [
-            self._recreate_client_subscription_on_server(server, request)
-            for server in servers
-        ]
-        return await asyncio.gather(*tasks)
-
     async def delete_client_on_all_servers(
         self,
         request: XuiBulkSubscriptionRequest,
@@ -486,74 +472,6 @@ class XuiClientService:
                 result=None,
                 error=f"неожиданная ошибка: {exc}",
             )
-        return XuiServerSubscriptionResult(
-            server=server,
-            result=result,
-            error=None,
-            validation_errors=tuple(validation_errors),
-        )
-
-    async def _recreate_client_subscription_on_server(
-        self,
-        server: Server,
-        request: XuiBulkSubscriptionRequest,
-    ) -> XuiServerSubscriptionResult:
-        api_token = server.xui_api_token or self.settings.xui_api_token
-        if not api_token:
-            return XuiServerSubscriptionResult(
-                server=server,
-                result=None,
-                error=(
-                    "у этого сервера нет xui api token в базе. "
-                    "сначала раскатай сервер."
-                ),
-            )
-
-        panel_url = self._resolve_panel_url(server.host)
-        try:
-            deleted = await self.delete_client(
-                panel_url=panel_url,
-                api_token=api_token,
-                client_name=request.client_name,
-                tls_verify=request.tls_verify,
-            )
-            server_request = XuiSubscriptionRequest(
-                server_ref=server.host,
-                client_name=request.client_name,
-                sub_base_url=None,
-                sub_path=request.sub_path,
-                clash_path=request.clash_path,
-                api_token=api_token,
-                inbound_ids=request.inbound_ids,
-                total_gb=request.total_gb,
-                days=request.days,
-                flow=request.flow,
-                limit_ip=request.limit_ip,
-                tg_id=request.tg_id,
-                comment=(
-                    f"{request.comment} | recreated after deleting {deleted} client refs"
-                    if request.comment
-                    else f"recreated after deleting {deleted} client refs"
-                ),
-                tls_verify=request.tls_verify,
-            )
-            result = await self.ensure_client_subscription(server_request)
-            validation_errors = await self.validate_clash_subscription(
-                result.clash_subscription_url
-            )
-        except XuiApiError as exc:
-            return XuiServerSubscriptionResult(
-                server=server,
-                result=None,
-                error=str(exc),
-            )
-        except Exception as exc:
-            return XuiServerSubscriptionResult(
-                server=server,
-                result=None,
-                error=f"неожиданная ошибка: {exc}",
-            )
-
         return XuiServerSubscriptionResult(
             server=server,
             result=result,
