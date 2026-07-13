@@ -682,9 +682,12 @@
                   tag = inbound["tag"]
                   if protocol == "vless" and stream.get("security") == "reality":
                       reality = stream.get("realitySettings") or {}
-                      for field in ("privateKey", "publicKey"):
+                      for field in ("privateKey",):
                           if not reality.get(field):
                               raise RuntimeError(f"{tag} misses realitySettings.{field}")
+                      reality_client = reality.get("settings") or {}
+                      if not reality_client.get("publicKey"):
+                          raise RuntimeError(f"{tag} misses realitySettings.settings.publicKey")
                       if not reality.get("shortIds"):
                           raise RuntimeError(f"{tag} misses realitySettings.shortIds")
                       if not reality.get("serverNames"):
@@ -704,11 +707,57 @@
                       if not tls.get("certificates"):
                           raise RuntimeError(f"{tag} misses tlsSettings.certificates")
 
+          def merge_list_by_key(base_items, existing_items, key):
+              result = []
+              seen = set()
+              for item in base_items + existing_items:
+                  if not isinstance(item, dict):
+                      continue
+                  item_key = item.get(key)
+                  if not item_key:
+                      result.append(item)
+                      continue
+                  if item_key in seen:
+                      continue
+                  seen.add(item_key)
+                  result.append(item)
+              return result
+
+          def preserve_existing_clients(inbound, existing_settings_raw):
+              if not existing_settings_raw:
+                  return inbound
+              try:
+                  existing_settings = json.loads(existing_settings_raw)
+                  new_settings = json.loads(inbound["settings"])
+              except json.JSONDecodeError:
+                  return inbound
+
+              if not isinstance(existing_settings, dict) or not isinstance(new_settings, dict):
+                  return inbound
+
+              if isinstance(new_settings.get("clients"), list) and isinstance(existing_settings.get("clients"), list):
+                  new_settings["clients"] = merge_list_by_key(
+                      new_settings["clients"],
+                      existing_settings["clients"],
+                      "email",
+                  )
+
+              if isinstance(new_settings.get("users"), list) and isinstance(existing_settings.get("users"), list):
+                  new_settings["users"] = merge_list_by_key(
+                      new_settings["users"],
+                      existing_settings["users"],
+                      "email",
+                  )
+
+              inbound["settings"] = json.dumps(new_settings, separators=(",", ":"))
+              return inbound
+
           def upsert_inbound(conn, inbound):
               columns = [row[1] for row in conn.execute("PRAGMA table_info(inbounds)").fetchall()]
               payload = {key: value for key, value in inbound.items() if key in columns}
-              existing = conn.execute("SELECT id FROM inbounds WHERE tag = ?", (payload["tag"],)).fetchone()
+              existing = conn.execute("SELECT id, settings FROM inbounds WHERE tag = ?", (payload["tag"],)).fetchone()
               if existing:
+                  payload = preserve_existing_clients(payload, existing[1])
                   assignments = ", ".join([f"{key} = ?" for key in payload if key != "tag"])
                   values = [value for key, value in payload.items() if key != "tag"] + [payload["tag"]]
                   conn.execute(f"UPDATE inbounds SET {assignments} WHERE tag = ?", values)
@@ -798,8 +847,13 @@
                                   "xver": 0,
                                   "serverNames": [env["XUI_REALITY_SERVER_NAME"]],
                                   "privateKey": data["reality_private_key"],
-                                  "publicKey": data["reality_public_key"],
                                   "shortIds": [data["reality_short_id"]],
+                                  "settings": {
+                                      "publicKey": data["reality_public_key"],
+                                      "fingerprint": "chrome",
+                                      "serverName": env["XUI_REALITY_SERVER_NAME"],
+                                      "spiderX": "/",
+                                  },
                                   "minClientVer": "",
                                   "maxClientVer": "",
                                   "maxTimeDiff": 0,
