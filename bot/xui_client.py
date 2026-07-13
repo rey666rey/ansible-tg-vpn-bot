@@ -103,6 +103,20 @@ class XuiServerCheckResult:
     details: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class XuiServerDeleteResult:
+    server: Server
+    deleted: int
+    error: str | None
+
+
+@dataclass(frozen=True)
+class XuiClientRef:
+    inbound_id: int
+    client_id: str
+    sub_id: str | None
+
+
 class XuiApiError(RuntimeError):
     pass
 
@@ -406,6 +420,34 @@ class XuiClientService:
         ]
         return await asyncio.gather(*tasks)
 
+    async def recreate_client_subscription_on_all_servers(
+        self,
+        request: XuiBulkSubscriptionRequest,
+    ) -> list[XuiServerSubscriptionResult]:
+        servers = self.server_repository.list()
+        if not servers:
+            raise XuiApiError("в базе пока нет серверов. сначала раскатай сервер.")
+
+        tasks = [
+            self._recreate_client_subscription_on_server(server, request)
+            for server in servers
+        ]
+        return await asyncio.gather(*tasks)
+
+    async def delete_client_on_all_servers(
+        self,
+        request: XuiBulkSubscriptionRequest,
+    ) -> list[XuiServerDeleteResult]:
+        servers = self.server_repository.list()
+        if not servers:
+            raise XuiApiError("в базе пока нет серверов. сначала раскатай сервер.")
+
+        tasks = [
+            self._delete_client_on_server(server, request)
+            for server in servers
+        ]
+        return await asyncio.gather(*tasks)
+
     async def _ensure_client_subscription_on_server(
         self,
         server: Server,
@@ -449,6 +491,117 @@ class XuiClientService:
             result=result,
             error=None,
             validation_errors=tuple(validation_errors),
+        )
+
+    async def _recreate_client_subscription_on_server(
+        self,
+        server: Server,
+        request: XuiBulkSubscriptionRequest,
+    ) -> XuiServerSubscriptionResult:
+        api_token = server.xui_api_token or self.settings.xui_api_token
+        if not api_token:
+            return XuiServerSubscriptionResult(
+                server=server,
+                result=None,
+                error=(
+                    "у этого сервера нет xui api token в базе. "
+                    "сначала раскатай сервер."
+                ),
+            )
+
+        panel_url = self._resolve_panel_url(server.host)
+        try:
+            deleted = await self.delete_client(
+                panel_url=panel_url,
+                api_token=api_token,
+                client_name=request.client_name,
+                tls_verify=request.tls_verify,
+            )
+            server_request = XuiSubscriptionRequest(
+                server_ref=server.host,
+                client_name=request.client_name,
+                sub_base_url=None,
+                sub_path=request.sub_path,
+                clash_path=request.clash_path,
+                api_token=api_token,
+                inbound_ids=request.inbound_ids,
+                total_gb=request.total_gb,
+                days=request.days,
+                flow=request.flow,
+                limit_ip=request.limit_ip,
+                tg_id=request.tg_id,
+                comment=(
+                    f"{request.comment} | recreated after deleting {deleted} client refs"
+                    if request.comment
+                    else f"recreated after deleting {deleted} client refs"
+                ),
+                tls_verify=request.tls_verify,
+            )
+            result = await self.ensure_client_subscription(server_request)
+            validation_errors = await self.validate_clash_subscription(
+                result.clash_subscription_url
+            )
+        except XuiApiError as exc:
+            return XuiServerSubscriptionResult(
+                server=server,
+                result=None,
+                error=str(exc),
+            )
+        except Exception as exc:
+            return XuiServerSubscriptionResult(
+                server=server,
+                result=None,
+                error=f"неожиданная ошибка: {exc}",
+            )
+
+        return XuiServerSubscriptionResult(
+            server=server,
+            result=result,
+            error=None,
+            validation_errors=tuple(validation_errors),
+        )
+
+    async def _delete_client_on_server(
+        self,
+        server: Server,
+        request: XuiBulkSubscriptionRequest,
+    ) -> XuiServerDeleteResult:
+        api_token = server.xui_api_token or self.settings.xui_api_token
+        if not api_token:
+            return XuiServerDeleteResult(
+                server=server,
+                deleted=0,
+                error=(
+                    "у этого сервера нет xui api token в базе. "
+                    "сначала раскатай сервер."
+                ),
+            )
+
+        panel_url = self._resolve_panel_url(server.host)
+        try:
+            deleted = await self.delete_client(
+                panel_url=panel_url,
+                api_token=api_token,
+                client_name=request.client_name,
+                tls_verify=request.tls_verify,
+            )
+        except XuiApiError as exc:
+            return XuiServerDeleteResult(
+                server=server,
+                deleted=0,
+                error=str(exc),
+            )
+        except Exception as exc:
+            return XuiServerDeleteResult(
+                server=server,
+                deleted=0,
+                error=f"неожиданная ошибка: {exc}",
+            )
+
+        return XuiServerDeleteResult(
+            server=server,
+            deleted=deleted,
+            error=None,
         )
 
     async def check_all_servers(self) -> list[XuiServerCheckResult]:
@@ -530,6 +683,40 @@ class XuiClientService:
 
         return _validate_mihomo_subscription_text(text)
 
+    async def delete_client(
+        self,
+        panel_url: str,
+        api_token: str,
+        client_name: str,
+        tls_verify: bool,
+    ) -> int:
+        refs = await self._find_client_refs(
+            panel_url=panel_url,
+            api_token=api_token,
+            client_name=client_name,
+            tls_verify=tls_verify,
+        )
+        if not refs:
+            return 0
+
+        deleted = 0
+        for ref in refs:
+            response = await asyncio.to_thread(
+                self._post_json_with_scheme_fallback,
+                _api_url(
+                    panel_url,
+                    f"/panel/api/inbounds/{ref.inbound_id}/delClient/{quote(ref.client_id, safe='')}",
+                ),
+                api_token,
+                {},
+                tls_verify,
+            )
+            if not response.get("success", False):
+                message = response.get("msg") or response.get("message") or "3x-ui вернул ошибку."
+                raise XuiApiError(str(message))
+            deleted += 1
+        return deleted
+
     async def _find_client_sub_id(
         self,
         panel_url: str,
@@ -537,6 +724,23 @@ class XuiClientService:
         client_name: str,
         tls_verify: bool,
     ) -> str | None:
+        refs = await self._find_client_refs(
+            panel_url=panel_url,
+            api_token=api_token,
+            client_name=client_name,
+            tls_verify=tls_verify,
+        )
+        if not refs:
+            return None
+        return refs[0].sub_id
+
+    async def _find_client_refs(
+        self,
+        panel_url: str,
+        api_token: str,
+        client_name: str,
+        tls_verify: bool,
+    ) -> tuple[XuiClientRef, ...]:
         response = await asyncio.to_thread(
             self._get_json_with_scheme_fallback,
             _api_url(panel_url, "/panel/api/inbounds/list"),
@@ -544,14 +748,19 @@ class XuiClientService:
             tls_verify,
         )
         if not response.get("success", False):
-            return None
+            return ()
 
         rows = response.get("obj")
         if not isinstance(rows, list):
-            return None
+            return ()
 
+        refs: list[XuiClientRef] = []
         for row in rows:
             if not isinstance(row, dict):
+                continue
+            try:
+                inbound_id = int(row["id"])
+            except (KeyError, TypeError, ValueError):
                 continue
             settings = _loads_json_object(row.get("settings"))
             clients = settings.get("clients")
@@ -563,10 +772,19 @@ class XuiClientService:
                 email = str(client.get("email") or "").strip()
                 if email != client_name:
                     continue
+                client_id = str(client.get("id") or "").strip()
+                if not client_id:
+                    continue
                 sub_id = str(client.get("subId") or "").strip()
-                return sub_id or None
+                refs.append(
+                    XuiClientRef(
+                        inbound_id=inbound_id,
+                        client_id=client_id,
+                        sub_id=sub_id or None,
+                    )
+                )
 
-        return None
+        return tuple(refs)
 
     async def _resolve_inbound_ids(
         self,

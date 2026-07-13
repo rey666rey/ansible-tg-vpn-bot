@@ -26,7 +26,9 @@ if __package__ in {None, ""}:
         BACKUP_BUTTON,
         CHECK_SERVERS_BUTTON,
         CLIENTS_BUTTON,
+        DELETE_USER_BUTTON,
         GET_SUBSCRIPTION_BUTTON,
+        RECREATE_USER_BUTTON,
         ROLLOUT_BUTTON,
         SERVERS_BUTTON,
         main_keyboard,
@@ -45,7 +47,9 @@ else:
         BACKUP_BUTTON,
         CHECK_SERVERS_BUTTON,
         CLIENTS_BUTTON,
+        DELETE_USER_BUTTON,
         GET_SUBSCRIPTION_BUTTON,
+        RECREATE_USER_BUTTON,
         ROLLOUT_BUTTON,
         SERVERS_BUTTON,
         main_keyboard,
@@ -65,6 +69,14 @@ class RolloutStates(StatesGroup):
 
 
 class SubscriptionStates(StatesGroup):
+    waiting_payload = State()
+
+
+class RecreateUserStates(StatesGroup):
+    waiting_payload = State()
+
+
+class DeleteUserStates(StatesGroup):
     waiting_payload = State()
 
 
@@ -239,6 +251,61 @@ async def subscription_button(
     )
 
 
+@router.message(F.text.in_({RECREATE_USER_BUTTON, "пересоздать пользователя", "удалить и добавить снова"}))
+async def recreate_user_button(
+    message: Message,
+    state: FSMContext,
+    server_repository: ServerRepository,
+) -> None:
+    await state.set_state(RecreateUserStates.waiting_payload)
+    servers = server_repository.list()
+    server_lines = "\n".join(
+        f"{server.id}. {html.escape(server.subscription_host or server.host)}"
+        for server in servers
+    )
+    servers_text = (
+        f"\n\n🖥 серверы в базе:\n<code>{server_lines}</code>"
+        if server_lines
+        else "\n\n🫙 серверов в базе пока нет."
+    )
+    await message.answer(
+        "♻️ пришли имя клиента. я удалю его на всех серверах, "
+        "создам заново и верну новые сабки с новой кракозяброй:\n"
+        "<code>client-name</code>\n\n"
+        "или так, если нужны параметры:\n"
+        "<code>client=client-name\n"
+        "days=30\n"
+        "gb=100</code>"
+        f"{servers_text}",
+        reply_markup=subscription_keyboard(),
+    )
+
+
+@router.message(F.text.in_({DELETE_USER_BUTTON, "удалить пользователя"}))
+async def delete_user_button(
+    message: Message,
+    state: FSMContext,
+    server_repository: ServerRepository,
+) -> None:
+    await state.set_state(DeleteUserStates.waiting_payload)
+    servers = server_repository.list()
+    server_lines = "\n".join(
+        f"{server.id}. {html.escape(server.subscription_host or server.host)}"
+        for server in servers
+    )
+    servers_text = (
+        f"\n\n🖥 серверы в базе:\n<code>{server_lines}</code>"
+        if server_lines
+        else "\n\n🫙 серверов в базе пока нет."
+    )
+    await message.answer(
+        "🗑 пришли имя клиента. я удалю его на всех серверах из базы:\n"
+        "<code>client-name</code>"
+        f"{servers_text}",
+        reply_markup=subscription_keyboard(),
+    )
+
+
 @router.message(RolloutStates.waiting_payload)
 async def rollout_payload(
     message: Message,
@@ -395,6 +462,114 @@ async def subscription_payload(
         )
 
 
+@router.message(RecreateUserStates.waiting_payload)
+async def recreate_user_payload(
+    message: Message,
+    state: FSMContext,
+    xui_client_service: XuiClientService,
+    server_repository: ServerRepository,
+) -> None:
+    if message.text in {BACK_BUTTON, "назад"}:
+        await back_to_home(message, state)
+        return
+
+    try:
+        request = parse_bulk_subscription_message(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=subscription_keyboard())
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        logging.info("Could not delete recreate payload message", exc_info=True)
+
+    status_message = await message.answer(
+        f"♻️ пересоздаю <code>{html.escape(request.client_name)}</code> на всех серверах.",
+        reply_markup=subscription_keyboard(),
+    )
+
+    try:
+        results = await xui_client_service.recreate_client_subscription_on_all_servers(request)
+    except XuiApiError as exc:
+        await status_message.answer(
+            "🚨 не смог пересоздать клиента:\n"
+            f"<pre>{html.escape(str(exc))}</pre>",
+            reply_markup=subscription_keyboard(),
+        )
+        return
+
+    await state.clear()
+    server_repository.delete_client_records(request.client_name)
+    for item in results:
+        if item.result is None:
+            continue
+        server_repository.save_client(
+            name=item.result.client_name,
+            server_host=item.server.subscription_host or item.server.host,
+            subscription_url=item.result.subscription_url,
+            clash_subscription_url=item.result.clash_subscription_url,
+        )
+
+    for index, text in enumerate(
+        _format_bulk_subscription_messages(
+            request.client_name,
+            results,
+            header_action="пересоздано",
+        ),
+        start=1,
+    ):
+        await status_message.answer(
+            text,
+            reply_markup=main_keyboard() if index == 1 else None,
+        )
+
+
+@router.message(DeleteUserStates.waiting_payload)
+async def delete_user_payload(
+    message: Message,
+    state: FSMContext,
+    xui_client_service: XuiClientService,
+    server_repository: ServerRepository,
+) -> None:
+    if message.text in {BACK_BUTTON, "назад"}:
+        await back_to_home(message, state)
+        return
+
+    try:
+        request = parse_bulk_subscription_message(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=subscription_keyboard())
+        return
+
+    try:
+        await message.delete()
+    except Exception:
+        logging.info("Could not delete delete-user payload message", exc_info=True)
+
+    status_message = await message.answer(
+        f"🗑 удаляю <code>{html.escape(request.client_name)}</code> на всех серверах.",
+        reply_markup=subscription_keyboard(),
+    )
+
+    try:
+        results = await xui_client_service.delete_client_on_all_servers(request)
+    except XuiApiError as exc:
+        await status_message.answer(
+            "🚨 не смог удалить клиента:\n"
+            f"<pre>{html.escape(str(exc))}</pre>",
+            reply_markup=subscription_keyboard(),
+        )
+        return
+
+    await state.clear()
+    deleted_local = server_repository.delete_client_records(request.client_name)
+    await status_message.answer(
+        _format_delete_user_message(request.client_name, results, deleted_local),
+        reply_markup=main_keyboard(),
+    )
+
+
 @router.message()
 async def fallback(message: Message) -> None:
     await message.answer(
@@ -430,7 +605,11 @@ async def main() -> None:
     await dp.start_polling(bot)
 
 
-def _format_bulk_subscription_messages(client_name: str, results: list) -> list[str]:
+def _format_bulk_subscription_messages(
+    client_name: str,
+    results: list,
+    header_action: str = "готово",
+) -> list[str]:
     blocks: list[str] = []
     for item in results:
         if item.result is None:
@@ -467,7 +646,7 @@ def _format_bulk_subscription_messages(client_name: str, results: list) -> list[
         )
 
     header_name = html.escape(client_name)
-    header = f"✅ готово для <code>{header_name}</code>. блеск нанесен тонким слоем."
+    header = f"✅ {header_action} для <code>{header_name}</code>. блеск нанесен тонким слоем."
     return _chunk_message_blocks(header, blocks)
 
 
@@ -485,6 +664,32 @@ def _chunk_message_blocks(header: str, blocks: list[str], limit: int = 3600) -> 
     if current:
         messages.append(current)
     return messages or [header]
+
+
+def _format_delete_user_message(client_name: str, results: list, deleted_local: int) -> str:
+    blocks: list[str] = []
+    for item in results:
+        host = html.escape(item.server.subscription_host or item.server.host)
+        if item.error:
+            blocks.append(
+                f"<b>{host}</b>\n"
+                "🚨 ошибка:\n"
+                f"<pre>{html.escape(_short_error(item.error))}</pre>"
+            )
+            continue
+
+        status = (
+            f"удалено refs: <code>{item.deleted}</code>"
+            if item.deleted
+            else "клиент не найден"
+        )
+        blocks.append(f"<b>{host}</b>\n🗑 {status}")
+
+    header = (
+        f"🗑 удаление <code>{html.escape(client_name)}</code>.\n"
+        f"sqlite-записей удалено: <code>{deleted_local}</code>"
+    )
+    return "\n\n".join([header, *blocks])
 
 
 def _subscription_host(subscription_url: str, fallback: str) -> str:
