@@ -71,12 +71,12 @@ class SubscriptionStates(StatesGroup):
 async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "глянцевый пульт готов. выбирай, что будем полировать.",
+        "💅 глянцевый пульт готов. выбирай, что будем полировать.",
         reply_markup=main_keyboard(),
     )
 
 
-@router.message(F.text == ROLLOUT_BUTTON)
+@router.message(F.text.in_({ROLLOUT_BUTTON, "раскатать сервер"}))
 async def rollout_button(
     message: Message,
     state: FSMContext,
@@ -84,12 +84,12 @@ async def rollout_button(
 ) -> None:
     runner = rollout_runner
     if runner.busy:
-        await message.answer("раскатка уже идет. дай ей чуть блеска и времени.")
+        await message.answer("💎 раскатка уже идет. дай ей чуть блеска и времени.")
         return
 
     await state.set_state(RolloutStates.waiting_payload)
     await message.answer(
-        "пришли ip и домен. если user/password не указаны, возьму admin_user "
+        "💎 пришли ip и домен. если user/password не указаны, возьму admin_user "
         "и admin_user_password из .env:\n"
         "<code>ip=203.0.113.10\n"
         "domain=fr.example.com</code>\n\n"
@@ -102,16 +102,16 @@ async def rollout_button(
     )
 
 
-@router.message(F.text == BACK_BUTTON)
+@router.message(F.text.in_({BACK_BUTTON, "назад"}))
 async def back_to_home(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "вернулись в сияющее меню.",
+        "↩️ вернулись в сияющее меню.",
         reply_markup=main_keyboard(),
     )
 
 
-@router.message(F.text == SERVERS_BUTTON)
+@router.message(F.text.in_({SERVERS_BUTTON, "серверы"}))
 async def servers_button(
     message: Message,
     server_repository: ServerRepository,
@@ -119,46 +119,46 @@ async def servers_button(
     servers = server_repository.list()
     if not servers:
         await message.answer(
-            "пока ни одного сервера в шкатулке.",
+            "🫙 пока ни одного сервера в шкатулке.",
             reply_markup=main_keyboard(),
         )
         return
 
-    lines = ["серверы в базе:"]
+    lines = ["🖥 серверы в базе:"]
     for server in servers:
-        token = "token есть" if server.xui_api_token else "token нет"
+        token = "🔐 token есть" if server.xui_api_token else "🕳 token нет"
         lines.append(
             f"{server.id}. <b>{html.escape(server.host)}</b> · {token}"
         )
     await message.answer("\n".join(lines), reply_markup=main_keyboard())
 
 
-@router.message(F.text == CHECK_SERVERS_BUTTON)
+@router.message(F.text.in_({CHECK_SERVERS_BUTTON, "проверить серверы"}))
 async def check_servers_button(
     message: Message,
     xui_client_service: XuiClientService,
 ) -> None:
     status_message = await message.answer(
-        "проверяю серверы. маленький техно-глянец в процессе.",
+        "🩺 проверяю серверы. маленький техно-глянец в процессе.",
         reply_markup=main_keyboard(),
     )
     results = await xui_client_service.check_all_servers()
     if not results:
-        await status_message.answer("серверов пока нет.")
+        await status_message.answer("🫙 серверов пока нет.")
         return
 
     blocks: list[str] = []
     for item in results:
-        marker = "ok" if item.ok else "alarm"
+        marker = "✅ ok" if item.ok else "🚨 alarm"
         details = "\n".join(f"· {html.escape(detail)}" for detail in item.details)
         blocks.append(
             f"<b>{html.escape(item.server.host)}</b> · {marker}\n{details}"
         )
-    for text in _chunk_message_blocks("проверка серверов:", blocks):
+    for text in _chunk_message_blocks("🩺 проверка серверов:", blocks):
         await status_message.answer(text, reply_markup=main_keyboard())
 
 
-@router.message(F.text == CLIENTS_BUTTON)
+@router.message(F.text.in_({CLIENTS_BUTTON, "клиенты"}))
 async def clients_button(
     message: Message,
     server_repository: ServerRepository,
@@ -166,7 +166,7 @@ async def clients_button(
     clients = server_repository.list_clients()
     if not clients:
         await message.answer(
-            "клиентов пока нет. витрина чистая.",
+            "👥 клиентов пока нет. витрина чистая.",
             reply_markup=main_keyboard(),
         )
         return
@@ -175,32 +175,32 @@ async def clients_button(
     for client in clients:
         blocks.append(
             f"<b>{html.escape(client.name)}</b>\n"
-            f"сервер: <code>{html.escape(client.server_host)}</code>\n"
-            f"обновлен: <code>{html.escape(client.updated_at or client.created_at)}</code>\n"
-            f"sub: <code>{html.escape(client.subscription_url)}</code>\n"
-            f"clash: <code>{html.escape(client.clash_subscription_url)}</code>"
+            f"🖥 сервер: <code>{html.escape(client.server_host)}</code>\n"
+            f"🕒 обновлен: <code>{html.escape(client.updated_at or client.created_at)}</code>\n"
+            f"🔗 sub: <code>{html.escape(client.subscription_url)}</code>\n"
+            f"⚔️ clash: <code>{html.escape(client.clash_subscription_url)}</code>"
         )
-    for text in _chunk_message_blocks("клиенты в базе:", blocks):
+    for text in _chunk_message_blocks("👥 клиенты в базе:", blocks):
         await message.answer(text, reply_markup=main_keyboard())
 
 
-@router.message(F.text == BACKUP_BUTTON)
+@router.message(F.text.in_({BACKUP_BUTTON, "бэкап"}))
 async def backup_button(
     message: Message,
     settings: Settings,
 ) -> None:
     if not settings.database_path.exists():
-        await message.answer("sqlite-базы пока нет.", reply_markup=main_keyboard())
+        await message.answer("👜 sqlite-базы пока нет.", reply_markup=main_keyboard())
         return
 
     await message.answer_document(
         FSInputFile(settings.database_path, filename="bot.sqlite3"),
-        caption="бэкап базы. маленький сейф с блеском.",
+        caption="👜 бэкап базы. маленький сейф с блеском.",
         reply_markup=main_keyboard(),
     )
 
 
-@router.message(F.text == GET_SUBSCRIPTION_BUTTON)
+@router.message(F.text.in_({GET_SUBSCRIPTION_BUTTON, "добавить пользователя"}))
 async def subscription_button(
     message: Message,
     state: FSMContext,
@@ -212,12 +212,12 @@ async def subscription_button(
         f"{server.id}. {html.escape(server.host)}" for server in servers
     )
     servers_text = (
-        f"\n\nсерверы в базе:\n<code>{server_lines}</code>"
+        f"\n\n🖥 серверы в базе:\n<code>{server_lines}</code>"
         if server_lines
-        else "\n\nсерверов в базе пока нет."
+        else "\n\n🫙 серверов в базе пока нет."
     )
     await message.answer(
-        "пришли имя клиента. создам его на всех серверах из базы:\n"
+        "✨ пришли имя клиента. создам его на всех серверах из базы:\n"
         "<code>client-name</code>\n\n"
         "или так, если нужны параметры:\n"
         "<code>client=client-name\n"
@@ -239,12 +239,12 @@ async def rollout_payload(
     settings: Settings,
 ) -> None:
     runner = rollout_runner
-    if message.text == BACK_BUTTON:
+    if message.text in {BACK_BUTTON, "назад"}:
         await back_to_home(message, state)
         return
 
     if runner.busy:
-        await message.answer("раскатка уже идет. дай ей чуть блеска и времени.")
+        await message.answer("💎 раскатка уже идет. дай ей чуть блеска и времени.")
         return
 
     try:
@@ -264,7 +264,7 @@ async def rollout_payload(
 
     await state.clear()
     status_message = await message.answer(
-        f"начинаю раскатку <code>{html.escape(request.ip)}</code> "
+        f"💎 начинаю раскатку <code>{html.escape(request.ip)}</code> "
         f"для <code>{html.escape(request.domain)}</code> "
         f"под <code>{html.escape(request.user)}</code>. "
         "отпишусь, когда ansible закончит.",
@@ -290,7 +290,7 @@ async def rollout_payload(
             else "xui api token не нашелся в выводе ansible."
         )
         await status_message.answer(
-            f"готово: <code>{html.escape(request.domain)}</code> раскатан.\n"
+            f"✅ готово: <code>{html.escape(request.domain)}</code> раскатан.\n"
             f"{server_status} id: <code>{server.id}</code>\n"
             f"{token_status}"
         )
@@ -299,7 +299,7 @@ async def rollout_payload(
     details = result.stderr_tail or result.stdout_tail or "ansible не вернул вывод."
     details = html.escape(details)
     await status_message.answer(
-        "раскатка упала.\n"
+        "🚨 раскатка упала.\n"
         f"код: <code>{result.returncode}</code>\n"
         f"<pre>{details}</pre>"
     )
@@ -311,7 +311,7 @@ async def subscription_payload(
     state: FSMContext,
     xui_client_service: XuiClientService,
 ) -> None:
-    if message.text == BACK_BUTTON:
+    if message.text in {BACK_BUTTON, "назад"}:
         await back_to_home(message, state)
         return
 
@@ -327,7 +327,7 @@ async def subscription_payload(
         logging.info("Could not delete subscription payload message", exc_info=True)
 
     status_message = await message.answer(
-        f"создаю <code>{html.escape(request.client_name)}</code> на всех серверах.",
+        f"✨ создаю <code>{html.escape(request.client_name)}</code> на всех серверах.",
         reply_markup=subscription_keyboard(),
     )
 
@@ -335,7 +335,7 @@ async def subscription_payload(
         results = await xui_client_service.ensure_client_subscription_on_all_servers(request)
     except XuiApiError as exc:
         await status_message.answer(
-            "не смог создать клиента или получить сабку:\n"
+            "🚨 не смог создать клиента или получить сабку:\n"
             f"<pre>{html.escape(str(exc))}</pre>",
             reply_markup=subscription_keyboard(),
         )
@@ -364,7 +364,7 @@ async def subscription_payload(
 @router.message()
 async def fallback(message: Message) -> None:
     await message.answer(
-        "выбери действие в меню. блеск сам себя не наведет.",
+        "✨ выбери действие в меню. блеск сам себя не наведет.",
         reply_markup=main_keyboard(),
     )
 
@@ -403,7 +403,7 @@ def _format_bulk_subscription_messages(client_name: str, results: list) -> list[
             host = html.escape(item.server.host)
             blocks.append(
                 f"<b>{host}</b>\n"
-                "ошибка:\n"
+                "🚨 ошибка:\n"
                 f"<pre>{html.escape(_short_error(item.error))}</pre>"
             )
             continue
@@ -423,17 +423,17 @@ def _format_bulk_subscription_messages(client_name: str, results: list) -> list[
         )
         blocks.append(
             f"<b>{host}</b>\n"
-            f"клиент: <code>{html.escape(item.result.client_name)}</code> ({status})"
+            f"👤 клиент: <code>{html.escape(item.result.client_name)}</code> ({status})"
             f"{inbound_text}"
             f"{validation_text}\n\n"
-            "обычная сабка:\n"
+            "🔗 обычная сабка:\n"
             f"<code>{html.escape(item.result.subscription_url)}</code>\n\n"
-            "clash:\n"
+            "⚔️ clash:\n"
             f"<code>{html.escape(item.result.clash_subscription_url)}</code>"
         )
 
     header_name = html.escape(client_name)
-    header = f"готово для <code>{header_name}</code>. блеск нанесен тонким слоем."
+    header = f"✅ готово для <code>{header_name}</code>. блеск нанесен тонким слоем."
     return _chunk_message_blocks(header, blocks)
 
 

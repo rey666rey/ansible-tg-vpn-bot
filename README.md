@@ -290,6 +290,14 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+Поставь системные зависимости для раскатки по SSH-паролю:
+
+```bash
+sudo apt update
+sudo apt install -y ansible sshpass
+ansible-playbook --version
+```
+
 Создай локальный `.env` и заполни секреты:
 
 ```bash
@@ -376,6 +384,21 @@ ANSIBLE_HOST_KEY_CHECKING=False
 
 ```bash
 ssh-keyscan -H 203.0.113.10 >> ~/.ssh/known_hosts
+```
+
+### Unable to create local directories(/private/tmp/ansible-local)
+
+Это macos-путь, который не подходит для ubuntu. В `.env` убери старую строку
+`ANSIBLE_LOCAL_TEMP=/private/tmp/ansible-local` или замени ее:
+
+```bash
+ANSIBLE_LOCAL_TEMP=/tmp/ansible-local
+```
+
+После правки перезапусти службу:
+
+```bash
+sudo systemctl restart server-tg-bot
 ```
 
 ### TLS certificate was not found

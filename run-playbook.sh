@@ -12,7 +12,14 @@ set -a
 . ./.env
 set +a
 
-export ANSIBLE_LOCAL_TEMP="${ANSIBLE_LOCAL_TEMP:-/private/tmp/ansible-local}"
+case "${ANSIBLE_LOCAL_TEMP:-}" in
+  ""|/private/*)
+    export ANSIBLE_LOCAL_TEMP="/tmp/ansible-local"
+    ;;
+  *)
+    export ANSIBLE_LOCAL_TEMP
+    ;;
+esac
 export ANSIBLE_HOST_KEY_CHECKING="${ANSIBLE_HOST_KEY_CHECKING:-False}"
 
 inventory_file="${ANSIBLE_INVENTORY:-inventory.ini}"

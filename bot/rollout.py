@@ -132,7 +132,8 @@ class RolloutRunner:
             inventory_path.chmod(0o600)
 
             env = os.environ.copy()
-            env.setdefault("ANSIBLE_LOCAL_TEMP", "/private/tmp/ansible-local")
+            if not env.get("ANSIBLE_LOCAL_TEMP") or env["ANSIBLE_LOCAL_TEMP"].startswith("/private/"):
+                env["ANSIBLE_LOCAL_TEMP"] = "/tmp/ansible-local"
             env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
             env["XUI_TLS_DOMAIN"] = request.domain
 
