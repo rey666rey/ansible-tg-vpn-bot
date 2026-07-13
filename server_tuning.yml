@@ -1143,27 +1143,21 @@
                       {
                           "protocol": "vless",
                           "settings": {
-                              "vnext": [
-                                  {
-                                      "address": "127.0.0.1",
-                                      "port": int(row["port"]),
-                                      "users": [
-                                          {
-                                              "id": client["id"],
-                                              "encryption": "none",
-                                              "flow": client.get("flow") or "xtls-rprx-vision",
-                                          }
-                                      ],
-                                  }
-                              ]
+                              "address": "127.0.0.1",
+                              "port": int(row["port"]),
+                              "id": client["id"],
+                              "encryption": "none",
+                              "flow": client.get("flow") or "xtls-rprx-vision",
+                              "level": 0,
                           },
                           "streamSettings": {
-                              "network": "tcp",
+                              "method": "raw",
+                              "rawSettings": {},
                               "security": "reality",
                               "realitySettings": {
                                   "serverName": server_names[0],
                                   "fingerprint": reality_client.get("fingerprint") or "chrome",
-                                  "publicKey": reality_client["publicKey"],
+                                  "password": reality_client["publicKey"],
                                   "shortId": short_ids[0],
                                   "spiderX": reality_client.get("spiderX") or "/",
                               },
