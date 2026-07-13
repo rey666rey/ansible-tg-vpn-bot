@@ -35,6 +35,7 @@ class XuiAddClientRequest:
     comment: str
     tls_verify: bool
     sub_id: str | None = None
+    auth: str | None = None
 
 
 @dataclass(frozen=True)
@@ -348,6 +349,7 @@ class XuiClientService:
             raise XuiApiError("задай xui_inbound_ids в .env.")
 
         sub_id = _generate_sub_id()
+        auth = _generate_sub_id(24)
         add_request = XuiAddClientRequest(
             server_ref=request.server_ref,
             api_token=api_token,
@@ -364,6 +366,7 @@ class XuiClientService:
             comment=request.comment,
             tls_verify=request.tls_verify,
             sub_id=sub_id,
+            auth=auth,
         )
 
         try:
@@ -371,12 +374,13 @@ class XuiClientService:
         except XuiApiError as exc:
             if not _looks_like_existing_client(str(exc)):
                 raise
-            existing_sub_id = await self._find_client_sub_id(
+            existing_refs = await self._find_client_refs(
                 panel_url=panel_url,
                 api_token=api_token,
                 client_name=request.client_name,
                 tls_verify=request.tls_verify,
             )
+            existing_sub_id = next((ref.sub_id for ref in existing_refs if ref.sub_id), None)
             if not existing_sub_id:
                 raise XuiApiError(
                     "клиент уже есть, но не смог найти его subId в 3x-ui. "
@@ -388,6 +392,33 @@ class XuiClientService:
                     "удали этого клиента в панели и создай заново через бота, "
                     "чтобы получить рандомную кракозябру в ссылке."
                 ) from exc
+            existing_inbound_ids = {ref.inbound_id for ref in existing_refs}
+            missing_inbound_ids = tuple(
+                inbound_id
+                for inbound_id in inbound_ids
+                if inbound_id not in existing_inbound_ids
+            )
+            if missing_inbound_ids:
+                await self.add_client(
+                    XuiAddClientRequest(
+                        server_ref=request.server_ref,
+                        api_token=api_token,
+                        inbound_ids=missing_inbound_ids,
+                        email=request.client_name,
+                        total_gb=request.total_gb,
+                        days=request.days,
+                        sub_base_url=request.sub_base_url,
+                        sub_path=request.sub_path,
+                        clash_path=request.clash_path,
+                        flow=request.flow or self.settings.xui_client_flow,
+                        limit_ip=request.limit_ip,
+                        tg_id=request.tg_id,
+                        comment=request.comment,
+                        tls_verify=request.tls_verify,
+                        sub_id=existing_sub_id,
+                        auth=_generate_sub_id(24),
+                    )
+                )
             return self._subscription_result(
                 panel_url,
                 request,
@@ -759,9 +790,11 @@ class XuiClientService:
     async def add_client(self, request: XuiAddClientRequest) -> XuiAddClientResult:
         panel_url = self._resolve_panel_url(request.server_ref)
         sub_id = request.sub_id or _generate_sub_id()
+        auth = request.auth or _generate_sub_id(24)
         payload = {
             "client": {
                 "id": str(uuid.uuid4()),
+                "auth": auth,
                 "email": request.email,
                 "security": "auto",
                 "flow": request.flow,
