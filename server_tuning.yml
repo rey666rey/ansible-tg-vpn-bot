@@ -1,0 +1,902 @@
+---
+- name: apply server tuning from current host
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    admin_user: "{{ lookup('ansible.builtin.env', 'ADMIN_USER') | default('rey', true) }}"
+    admin_user_password: "{{ lookup('ansible.builtin.env', 'ADMIN_USER_PASSWORD') }}"
+    admin_user_password_hash_override: "{{ lookup('ansible.builtin.env', 'ADMIN_USER_PASSWORD_HASH') }}"
+    admin_user_password_salt: "{{ lookup('ansible.builtin.env', 'ADMIN_USER_PASSWORD_SALT') | default('serveransible', true) }}"
+    admin_user_password_hash: "{{ admin_user_password_hash_override if (admin_user_password_hash_override | length > 0) else (admin_user_password | password_hash('sha512', admin_user_password_salt)) }}"
+    admin_user_shell: /bin/bash
+    admin_user_home: "/home/{{ admin_user }}"
+    admin_user_ssh_public_key_file: "{{ playbook_dir }}/rey_server_ed25519.pub"
+    ssh_port: 22
+    ssh_service_name: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
+    sudo_group: "{{ 'sudo' if ansible_facts['os_family'] == 'Debian' else 'wheel' }}"
+    disable_root_ssh: true
+    enable_ufw: true
+    enable_fail2ban: true
+    disable_icmp_ping: false
+
+    xui_install_url: https://raw.githubusercontent.com/MHSanaei/3x-ui/master/install.sh
+    xui_version: v3.4.2
+    xui_username: "{{ lookup('ansible.builtin.env', 'XUI_USERNAME') | default(admin_user, true) }}"
+    xui_password: "{{ lookup('ansible.builtin.env', 'XUI_PASSWORD') }}"
+    xui_panel_port: 2053
+    xui_web_base_path: rey
+    xui_api_token_name: "{{ lookup('ansible.builtin.env', 'XUI_API_TOKEN_NAME') | default('ansible', true) }}"
+    xui_api_token_file: /etc/x-ui/ansible-api-token.env
+    xui_subscription_port: 2096
+    xui_subscription_path: /sub/
+    xui_clash_subscription_path: /clash/
+
+    # Required for xhttp+tls and hysteria2 TLS certificates.
+    xui_tls_domain: "{{ lookup('ansible.builtin.env', 'XUI_TLS_DOMAIN') }}"
+    xui_acme_email: "{{ lookup('ansible.builtin.env', 'XUI_ACME_EMAIL') | default('', true) }}"
+    xui_cert_file: "/root/cert/{{ xui_tls_domain }}/fullchain.pem"
+    xui_key_file: "/root/cert/{{ xui_tls_domain }}/privkey.pem"
+
+    xui_manage_inbounds: "{{ lookup('ansible.builtin.env', 'XUI_MANAGE_INBOUNDS') | default('true', true) }}"
+    xui_reality_port: 8443
+    xui_reality_target: www.microsoft.com:443
+    xui_reality_server_name: www.microsoft.com
+    xui_xhttp_port: 443
+    xui_xhttp_path: /xhttp
+    xui_hysteria_port: 443
+    xui_hysteria_masquerade: https://www.microsoft.com/
+
+    common_packages:
+      - ca-certificates
+      - curl
+      - openssl
+      - python3
+      - socat
+      - sqlite3
+      - sudo
+      - ufw
+
+    sysctl_files:
+      - path: /etc/sysctl.d/99-server-network-tuning.conf
+        content: |
+          # network tuning mirrored from current server
+          net.core.default_qdisc = fq
+          net.ipv4.tcp_congestion_control = bbr
+          net.core.rmem_max = 134217728
+          net.core.wmem_max = 134217728
+          net.core.rmem_default = 16777216
+          net.core.wmem_default = 16777216
+          net.core.netdev_max_backlog = 65536
+          net.ipv4.tcp_rmem = 4096 87380 134217728
+          net.ipv4.tcp_wmem = 4096 65536 134217728
+          net.ipv4.tcp_fastopen = 3
+          net.core.somaxconn = 65535
+          net.ipv4.tcp_max_syn_backlog = 65535
+          net.ipv4.ip_forward = 1
+
+      - path: /etc/sysctl.d/99-swappiness.conf
+        content: |
+          vm.swappiness = 10
+
+      - path: /etc/sysctl.d/99-ipv6-tempaddr.conf
+        content: |
+          net.ipv6.conf.all.use_tempaddr = 0
+          net.ipv6.conf.default.use_tempaddr = 0
+
+  tasks:
+    - name: require tls domain when managing tls inbounds
+      ansible.builtin.assert:
+        that:
+          - xui_tls_domain | length > 0
+          - xui_tls_domain != 'vpn.example.com'
+          - not xui_tls_domain.endswith('.example.com')
+        fail_msg: "Set XUI_TLS_DOMAIN to a real domain that points to this server, not vpn.example.com."
+      when: xui_manage_inbounds | bool
+
+    - name: require sensitive values from environment
+      ansible.builtin.assert:
+        that:
+          - (admin_user_password | length > 0) or (admin_user_password_hash_override | length > 0)
+          - xui_password | length > 0
+        fail_msg: "Load .env first and set ADMIN_USER_PASSWORD or ADMIN_USER_PASSWORD_HASH, plus XUI_PASSWORD."
+
+    - name: update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: install base packages
+      ansible.builtin.package:
+        name: "{{ common_packages }}"
+        state: present
+
+    - name: create admin user
+      ansible.builtin.user:
+        name: "{{ admin_user }}"
+        password: "{{ admin_user_password_hash }}"
+        shell: "{{ admin_user_shell }}"
+        create_home: true
+        groups: "{{ sudo_group }}"
+        append: true
+        state: present
+
+    - name: create admin ssh directory
+      ansible.builtin.file:
+        path: "{{ admin_user_home }}/.ssh"
+        state: directory
+        owner: "{{ admin_user }}"
+        mode: '0700'
+
+    - name: authorize admin ssh public key
+      ansible.builtin.lineinfile:
+        path: "{{ admin_user_home }}/.ssh/authorized_keys"
+        line: "{{ lookup('ansible.builtin.file', admin_user_ssh_public_key_file) }}"
+        create: true
+        owner: "{{ admin_user }}"
+        mode: '0600'
+
+    - name: allow admin user passwordless sudo for ansible
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/90-{{ admin_user }}-ansible"
+        content: |
+          {{ admin_user }} ALL=(ALL) NOPASSWD:ALL
+        owner: root
+        group: root
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: verify admin user can use passwordless sudo
+      ansible.builtin.command: sudo -n true
+      become: true
+      become_user: "{{ admin_user }}"
+      changed_when: false
+
+    - name: allow ssh through ufw before enabling firewall
+      ansible.builtin.command: "ufw allow {{ ssh_port }}/tcp"
+      register: ufw_allow_ssh
+      changed_when: "'Rule added' in ufw_allow_ssh.stdout"
+      when: enable_ufw | bool
+
+    - name: allow public service ports through ufw
+      ansible.builtin.command: "ufw allow {{ item.port }}/{{ item.proto }}"
+      register: ufw_allow_xui
+      changed_when: "'Rule added' in ufw_allow_xui.stdout"
+      loop:
+        - { port: 80, proto: tcp }
+        - { port: "{{ xui_panel_port }}", proto: tcp }
+        - { port: "{{ xui_subscription_port }}", proto: tcp }
+        - { port: "{{ xui_hysteria_port }}", proto: udp }
+        - { port: "{{ xui_reality_port }}", proto: tcp }
+        - { port: "{{ xui_xhttp_port }}", proto: tcp }
+      when: enable_ufw | bool
+
+    - name: remove icmp ping block when diagnostics are enabled
+      ansible.builtin.file:
+        path: /etc/sysctl.d/99-disable-icmp-ping.conf
+        state: absent
+      notify: reload sysctl
+      when: not (disable_icmp_ping | bool)
+
+    - name: write icmp ping block when requested
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-disable-icmp-ping.conf
+        content: |
+          net.ipv4.icmp_echo_ignore_all = 1
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload sysctl
+      when: disable_icmp_ping | bool
+
+    - name: keep runtime icmp ping enabled when diagnostics are enabled
+      ansible.builtin.command: sysctl -w net.ipv4.icmp_echo_ignore_all=0
+      changed_when: false
+      when: not (disable_icmp_ping | bool)
+
+    - name: block runtime icmp ping when requested
+      ansible.builtin.command: sysctl -w net.ipv4.icmp_echo_ignore_all=1
+      changed_when: false
+      when: disable_icmp_ping | bool
+
+    - name: write sysctl snippets
+      ansible.builtin.copy:
+        dest: "{{ item.path }}"
+        content: "{{ item.content }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ sysctl_files }}"
+      notify: reload sysctl
+
+    - name: set runtime sysctl values now
+      ansible.builtin.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: false
+      loop:
+        - { key: 'net.core.default_qdisc', value: 'fq' }
+        - { key: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
+        - { key: 'net.core.rmem_max', value: '134217728' }
+        - { key: 'net.core.wmem_max', value: '134217728' }
+        - { key: 'net.core.rmem_default', value: '16777216' }
+        - { key: 'net.core.wmem_default', value: '16777216' }
+        - { key: 'net.core.netdev_max_backlog', value: '65536' }
+        - { key: 'net.ipv4.tcp_rmem', value: '4096 87380 134217728' }
+        - { key: 'net.ipv4.tcp_wmem', value: '4096 65536 134217728' }
+        - { key: 'net.ipv4.tcp_fastopen', value: '3' }
+        - { key: 'net.core.somaxconn', value: '65535' }
+        - { key: 'net.ipv4.tcp_max_syn_backlog', value: '65535' }
+        - { key: 'net.ipv4.ip_forward', value: '1' }
+        - { key: 'vm.swappiness', value: '10' }
+        - { key: 'net.ipv6.conf.all.use_tempaddr', value: '0' }
+        - { key: 'net.ipv6.conf.default.use_tempaddr', value: '0' }
+
+    - name: download 3x-ui installer
+      ansible.builtin.get_url:
+        url: "{{ xui_install_url }}"
+        dest: /tmp/3x-ui-install.sh
+        mode: '0755'
+
+    - name: install 3x-ui non-interactively
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - /tmp/3x-ui-install.sh
+          - "{{ xui_version }}"
+      args:
+        creates: /usr/local/x-ui/x-ui
+      async: 900
+      poll: 10
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+        NEEDRESTART_MODE: a
+        XUI_NONINTERACTIVE: "1"
+        XUI_USERNAME: "{{ xui_username }}"
+        XUI_PASSWORD: "{{ xui_password }}"
+        XUI_PANEL_PORT: "{{ xui_panel_port | string }}"
+        XUI_WEB_BASE_PATH: "{{ xui_web_base_path }}"
+        XUI_SSL_MODE: "{{ 'domain' if (xui_tls_domain | length > 0) else 'none' }}"
+        XUI_DOMAIN: "{{ xui_tls_domain }}"
+        XUI_ACME_EMAIL: "{{ xui_acme_email }}"
+        XUI_DB_TYPE: sqlite
+        XUI_ENABLE_FAIL2BAN: "false"
+
+    - name: enforce 3x-ui login and panel settings
+      ansible.builtin.command:
+        argv:
+          - /usr/local/x-ui/x-ui
+          - setting
+          - -username
+          - "{{ xui_username }}"
+          - -password
+          - "{{ xui_password }}"
+          - -port
+          - "{{ xui_panel_port | string }}"
+          - -webBasePath
+          - "{{ xui_web_base_path }}"
+      changed_when: true
+      notify: restart x-ui
+
+    - name: install 3x-ui api token configurator
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/configure-3x-ui-api-token.py
+        owner: root
+        group: root
+        mode: '0700'
+        content: |
+          #!/usr/bin/env python3
+          import hashlib
+          import os
+          import secrets
+          import sqlite3
+          import time
+
+          db_path = "/etc/x-ui/x-ui.db"
+          token_file = os.environ["XUI_API_TOKEN_FILE"]
+          token_name = os.environ["XUI_API_TOKEN_NAME"].strip() or "ansible"
+
+          def parse_env_file(path):
+              values = {}
+              if not os.path.exists(path):
+                  return values
+              with open(path, "r", encoding="utf-8") as handle:
+                  for line in handle:
+                      line = line.strip()
+                      if not line or line.startswith("#") or "=" not in line:
+                          continue
+                      key, value = line.split("=", 1)
+                      values[key] = value.strip().strip("'").strip('"')
+              return values
+
+          def write_token_file(token):
+              os.makedirs(os.path.dirname(token_file), mode=0o755, exist_ok=True)
+              with open(token_file, "w", encoding="utf-8") as handle:
+                  handle.write(f"XUI_API_TOKEN_NAME={token_name}\n")
+                  handle.write(f"XUI_API_TOKEN={token}\n")
+                  handle.write(f"XUI_API_AUTH_HEADER=Authorization: Bearer {token}\n")
+              os.chmod(token_file, 0o600)
+
+          def ensure_api_tokens_table(conn):
+              conn.execute(
+                  """
+                  CREATE TABLE IF NOT EXISTS api_tokens (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      name TEXT NOT NULL,
+                      token TEXT NOT NULL,
+                      enabled BOOLEAN NOT NULL DEFAULT 1,
+                      created_at INTEGER NOT NULL
+                  )
+                  """
+              )
+
+          def upsert_token(conn, token):
+              token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+              now = int(time.time())
+              row = conn.execute("SELECT id FROM api_tokens WHERE name = ?", (token_name,)).fetchone()
+              if row:
+                  conn.execute(
+                      "UPDATE api_tokens SET token = ?, enabled = 1 WHERE id = ?",
+                      (token_hash, row[0]),
+                  )
+              else:
+                  conn.execute(
+                      "INSERT INTO api_tokens (name, token, enabled, created_at) VALUES (?, ?, 1, ?)",
+                      (token_name, token_hash, now),
+                  )
+
+          def main():
+              values = parse_env_file(token_file)
+              token = values.get("XUI_API_TOKEN")
+              if not token:
+                  token = secrets.token_urlsafe(36)
+              write_token_file(token)
+              with sqlite3.connect(db_path) as conn:
+                  ensure_api_tokens_table(conn)
+                  upsert_token(conn, token)
+              print(f"XUI_API_TOKEN_NAME={token_name}")
+              print(f"XUI_API_TOKEN={token}")
+              print(f"XUI_API_AUTH_HEADER=Authorization: Bearer {token}")
+
+          if __name__ == "__main__":
+              main()
+
+    - name: configure 3x-ui api token
+      ansible.builtin.command: /usr/local/sbin/configure-3x-ui-api-token.py
+      environment:
+        XUI_API_TOKEN_NAME: "{{ xui_api_token_name }}"
+        XUI_API_TOKEN_FILE: "{{ xui_api_token_file }}"
+      register: xui_api_token
+      changed_when: true
+
+    - name: check 3x-ui tls certificate
+      ansible.builtin.stat:
+        path: "{{ xui_cert_file }}"
+      register: xui_cert
+      when: xui_manage_inbounds | bool
+
+    - name: check 3x-ui tls key
+      ansible.builtin.stat:
+        path: "{{ xui_key_file }}"
+      register: xui_key
+      when: xui_manage_inbounds | bool
+
+    - name: issue 3x-ui tls certificate when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        domain="{{ xui_tls_domain }}"
+        cert_dir="/root/cert/${domain}"
+        cert_file="${cert_dir}/fullchain.pem"
+        key_file="${cert_dir}/privkey.pem"
+
+        if [ -s "$cert_file" ] && [ -s "$key_file" ]; then
+          exit 0
+        fi
+
+        if [ ! -x /root/.acme.sh/acme.sh ]; then
+          curl -s https://get.acme.sh | sh
+        fi
+
+        /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force
+        if [ -n "{{ xui_acme_email }}" ]; then
+          /root/.acme.sh/acme.sh --register-account -m "{{ xui_acme_email }}"
+        fi
+
+        rm -rf "$cert_dir"
+        mkdir -p "$cert_dir"
+        rm -rf "/root/.acme.sh/${domain}" "/root/.acme.sh/${domain}_ecc"
+
+        systemctl stop x-ui 2>/dev/null || true
+        /root/.acme.sh/acme.sh --issue -d "$domain" --standalone --httpport 80 --force
+        /root/.acme.sh/acme.sh --installcert --force -d "$domain" \
+          --key-file "$key_file" \
+          --fullchain-file "$cert_file" \
+          --reloadcmd "systemctl restart x-ui 2>/dev/null || true"
+
+        chmod 600 "$key_file"
+        chmod 644 "$cert_file"
+        /usr/local/x-ui/x-ui cert -webCert "$cert_file" -webCertKey "$key_file"
+        systemctl restart x-ui
+      args:
+        executable: /bin/bash
+      register: xui_issue_cert
+      changed_when: xui_issue_cert.rc == 0
+      when:
+        - xui_manage_inbounds | bool
+        - not (xui_cert.stat.exists | default(false))
+          or not (xui_key.stat.exists | default(false))
+
+    - name: recheck 3x-ui tls certificate
+      ansible.builtin.stat:
+        path: "{{ xui_cert_file }}"
+      register: xui_cert
+      when: xui_manage_inbounds | bool
+
+    - name: recheck 3x-ui tls key
+      ansible.builtin.stat:
+        path: "{{ xui_key_file }}"
+      register: xui_key
+      when: xui_manage_inbounds | bool
+
+    - name: require tls certificate files for tls inbounds
+      ansible.builtin.assert:
+        that:
+          - xui_cert.stat.exists
+          - xui_key.stat.exists
+        fail_msg: "TLS certificate was not found. Check that {{ xui_tls_domain }} resolves to this server, DNS is not proxied, and external port 80/tcp is reachable. You can temporarily run with XUI_MANAGE_INBOUNDS=false to finish base setup."
+      when: xui_manage_inbounds | bool
+
+    - name: install 3x-ui inbound configurator
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/configure-3x-ui-inbounds.py
+        owner: root
+        group: root
+        mode: '0700'
+        content: |
+          #!/usr/bin/env python3
+          import glob
+          import json
+          import os
+          import re
+          import secrets
+          import sqlite3
+          import subprocess
+          import time
+          import uuid
+
+          db_path = "/etc/x-ui/x-ui.db"
+          secrets_path = "/etc/x-ui/ansible-inbound-secrets.json"
+
+          def rand_urlsafe(size=18):
+              return secrets.token_urlsafe(size).rstrip("=")
+
+          def find_xray():
+              candidates = glob.glob("/usr/local/x-ui/bin/xray*") + ["/usr/bin/xray", "/usr/local/bin/xray"]
+              for path in candidates:
+                  if os.path.isfile(path) and os.access(path, os.X_OK):
+                      return path
+              raise RuntimeError("xray binary was not found")
+
+          def load_secrets():
+              if os.path.exists(secrets_path):
+                  with open(secrets_path, "r", encoding="utf-8") as handle:
+                      data = json.load(handle)
+              else:
+                  data = {}
+              data.setdefault("reality_client_id", str(uuid.uuid4()))
+              data.setdefault("xhttp_client_id", str(uuid.uuid4()))
+              data.setdefault("hysteria_auth", rand_urlsafe())
+              data.setdefault("reality_sub_id", rand_urlsafe(8))
+              data.setdefault("xhttp_sub_id", rand_urlsafe(8))
+              data.setdefault("hysteria_sub_id", rand_urlsafe(8))
+              data.setdefault("reality_short_id", secrets.token_hex(8))
+              if "reality_private_key" not in data or "reality_public_key" not in data:
+                  output = subprocess.check_output([find_xray(), "x25519"], text=True)
+                  for line in output.splitlines():
+                      label, _, value = line.partition(":")
+                      label = re.sub(r"[^a-z]", "", label.strip().lower())
+                      value = value.strip()
+                      key = ""
+                      if "privatekey" in label:
+                          key = "privatekey"
+                      elif "publickey" in label:
+                          key = "publickey"
+                      if key == "privatekey" and value:
+                          data["reality_private_key"] = value
+                      elif key == "publickey" and value:
+                          data["reality_public_key"] = value
+                  if "reality_private_key" not in data or "reality_public_key" not in data:
+                      raise RuntimeError("could not parse xray x25519 private/public keys")
+              os.makedirs(os.path.dirname(secrets_path), mode=0o755, exist_ok=True)
+              with open(secrets_path, "w", encoding="utf-8") as handle:
+                  json.dump(data, handle, indent=2, sort_keys=True)
+              os.chmod(secrets_path, 0o600)
+              return data
+
+          def client(email, client_id, sub_id, flow=""):
+              return {
+                  "id": client_id,
+                  "flow": flow,
+                  "email": email,
+                  "limitIp": 0,
+                  "totalGB": 0,
+                  "expiryTime": 0,
+                  "enable": True,
+                  "tgId": 0,
+                  "subId": sub_id,
+                  "comment": "",
+                  "reset": 0,
+              }
+
+          def hysteria_client(email, auth, sub_id):
+              return {
+                  "auth": auth,
+                  "email": email,
+                  "limitIp": 0,
+                  "totalGB": 0,
+                  "expiryTime": 0,
+                  "enable": True,
+                  "tgId": 0,
+                  "subId": sub_id,
+                  "comment": "",
+                  "reset": 0,
+              }
+
+          def sniffing():
+              return {
+                  "enabled": True,
+                  "destOverride": ["http", "tls", "quic"],
+                  "metadataOnly": False,
+                  "routeOnly": False,
+              }
+
+          def tls_settings(cert_file, key_file, domain):
+              return {
+                  "serverName": domain,
+                  "minVersion": "1.2",
+                  "maxVersion": "1.3",
+                  "cipherSuites": "",
+                  "rejectUnknownSni": False,
+                  "certificates": [
+                      {
+                          "certificateFile": cert_file,
+                          "keyFile": key_file,
+                          "ocspStapling": 3600,
+                          "usage": "encipherment",
+                      }
+                  ],
+              }
+
+          def validate_inbound_payloads(inbounds):
+              for inbound in inbounds:
+                  stream = json.loads(inbound["stream_settings"])
+                  protocol = inbound["protocol"]
+                  tag = inbound["tag"]
+                  if protocol == "vless" and stream.get("security") == "reality":
+                      reality = stream.get("realitySettings") or {}
+                      for field in ("privateKey", "publicKey"):
+                          if not reality.get(field):
+                              raise RuntimeError(f"{tag} misses realitySettings.{field}")
+                      if not reality.get("shortIds"):
+                          raise RuntimeError(f"{tag} misses realitySettings.shortIds")
+                      if not reality.get("serverNames"):
+                          raise RuntimeError(f"{tag} misses realitySettings.serverNames")
+                  if protocol == "vless" and stream.get("network") == "xhttp":
+                      xhttp = stream.get("xhttpSettings") or {}
+                      tls = stream.get("tlsSettings") or {}
+                      if not xhttp.get("path"):
+                          raise RuntimeError(f"{tag} misses xhttpSettings.path")
+                      if not tls.get("certificates"):
+                          raise RuntimeError(f"{tag} misses tlsSettings.certificates")
+                  if protocol == "hysteria":
+                      hysteria = stream.get("hysteriaSettings") or {}
+                      tls = stream.get("tlsSettings") or {}
+                      if not hysteria.get("masquerade", {}).get("url"):
+                          raise RuntimeError(f"{tag} misses hysteriaSettings.masquerade.url")
+                      if not tls.get("certificates"):
+                          raise RuntimeError(f"{tag} misses tlsSettings.certificates")
+
+          def upsert_inbound(conn, inbound):
+              columns = [row[1] for row in conn.execute("PRAGMA table_info(inbounds)").fetchall()]
+              payload = {key: value for key, value in inbound.items() if key in columns}
+              existing = conn.execute("SELECT id FROM inbounds WHERE tag = ?", (payload["tag"],)).fetchone()
+              if existing:
+                  assignments = ", ".join([f"{key} = ?" for key in payload if key != "tag"])
+                  values = [value for key, value in payload.items() if key != "tag"] + [payload["tag"]]
+                  conn.execute(f"UPDATE inbounds SET {assignments} WHERE tag = ?", values)
+              else:
+                  names = ", ".join(payload.keys())
+                  placeholders = ", ".join(["?"] * len(payload))
+                  conn.execute(f"INSERT INTO inbounds ({names}) VALUES ({placeholders})", list(payload.values()))
+
+          def set_setting(conn, key, value):
+              existing = conn.execute("SELECT id FROM settings WHERE key = ?", (key,)).fetchone()
+              if existing:
+                  conn.execute("UPDATE settings SET value = ? WHERE key = ?", (value, key))
+              else:
+                  conn.execute("INSERT INTO settings (key, value) VALUES (?, ?)", (key, value))
+
+          def main():
+              required_env = [
+                  "XUI_TLS_DOMAIN",
+                  "XUI_CERT_FILE",
+                  "XUI_KEY_FILE",
+                  "XUI_SUBSCRIPTION_PORT",
+                  "XUI_SUBSCRIPTION_PATH",
+                  "XUI_CLASH_SUBSCRIPTION_PATH",
+                  "XUI_REALITY_PORT",
+                  "XUI_REALITY_TARGET",
+                  "XUI_REALITY_SERVER_NAME",
+                  "XUI_XHTTP_PORT",
+                  "XUI_XHTTP_PATH",
+                  "XUI_HYSTERIA_PORT",
+                  "XUI_HYSTERIA_MASQUERADE",
+              ]
+              env = {name: os.environ[name] for name in required_env}
+              data = load_secrets()
+              now = int(time.time() * 1000)
+
+              with sqlite3.connect(db_path) as conn:
+                  for key, value in {
+                      "subEnable": "true",
+                      "subPort": env["XUI_SUBSCRIPTION_PORT"],
+                      "subPath": env["XUI_SUBSCRIPTION_PATH"],
+                      "subDomain": env["XUI_TLS_DOMAIN"],
+                      "subCertFile": env["XUI_CERT_FILE"],
+                      "subKeyFile": env["XUI_KEY_FILE"],
+                      "subClashEnable": "true",
+                      "subClashPath": env["XUI_CLASH_SUBSCRIPTION_PATH"],
+                  }.items():
+                      set_setting(conn, key, value)
+
+                  row = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+                  if not row:
+                      raise RuntimeError("3x-ui user was not found")
+                  user_id = row[0]
+
+                  common = {
+                      "user_id": user_id,
+                      "up": 0,
+                      "down": 0,
+                      "total": 0,
+                      "enable": 1,
+                      "expiry_time": 0,
+                      "traffic_reset": "never",
+                      "last_traffic_reset_time": now,
+                      "listen": "",
+                  }
+
+                  inbounds = [
+                      {
+                          **common,
+                          "remark": "vless-reality-8443",
+                          "port": int(env["XUI_REALITY_PORT"]),
+                          "protocol": "vless",
+                          "tag": "in-vless-reality-8443",
+                          "settings": json.dumps({
+                              "clients": [
+                                  client("reality", data["reality_client_id"], data["reality_sub_id"], "xtls-rprx-vision")
+                              ],
+                              "decryption": "none",
+                              "fallbacks": [],
+                          }, separators=(",", ":")),
+                          "stream_settings": json.dumps({
+                              "network": "tcp",
+                              "security": "reality",
+                              "tcpSettings": {"acceptProxyProtocol": False, "header": {"type": "none"}},
+                              "realitySettings": {
+                                  "show": False,
+                                  "target": env["XUI_REALITY_TARGET"],
+                                  "xver": 0,
+                                  "serverNames": [env["XUI_REALITY_SERVER_NAME"]],
+                                  "privateKey": data["reality_private_key"],
+                                  "publicKey": data["reality_public_key"],
+                                  "shortIds": [data["reality_short_id"]],
+                                  "minClientVer": "",
+                                  "maxClientVer": "",
+                                  "maxTimeDiff": 0,
+                              },
+                          }, separators=(",", ":")),
+                          "sniffing": json.dumps(sniffing(), separators=(",", ":")),
+                      },
+                      {
+                          **common,
+                          "remark": "vless-xhttp-tls-443",
+                          "port": int(env["XUI_XHTTP_PORT"]),
+                          "protocol": "vless",
+                          "tag": "in-vless-xhttp-tls-443",
+                          "settings": json.dumps({
+                              "clients": [client("xhttp", data["xhttp_client_id"], data["xhttp_sub_id"])],
+                              "decryption": "none",
+                              "fallbacks": [],
+                          }, separators=(",", ":")),
+                          "stream_settings": json.dumps({
+                              "network": "xhttp",
+                              "security": "tls",
+                              "tlsSettings": tls_settings(env["XUI_CERT_FILE"], env["XUI_KEY_FILE"], env["XUI_TLS_DOMAIN"]),
+                              "xhttpSettings": {
+                                  "host": env["XUI_TLS_DOMAIN"],
+                                  "path": env["XUI_XHTTP_PATH"],
+                                  "mode": "auto",
+                                  "extra": {
+                                      "headers": {},
+                                      "xPaddingBytes": "100-1000",
+                                      "noSSEHeader": False,
+                                      "scMaxBufferedPosts": 30,
+                                      "scStreamUpServerSecs": "20-80",
+                                  },
+                              },
+                          }, separators=(",", ":")),
+                          "sniffing": json.dumps(sniffing(), separators=(",", ":")),
+                      },
+                      {
+                          **common,
+                          "remark": "hysteria2-443",
+                          "port": int(env["XUI_HYSTERIA_PORT"]),
+                          "protocol": "hysteria",
+                          "tag": "in-hysteria2-443",
+                          "settings": json.dumps({
+                              "version": 2,
+                              "clients": [
+                                  hysteria_client("hysteria2", data["hysteria_auth"], data["hysteria_sub_id"])
+                              ],
+                              "users": [
+                                  {
+                                      "auth": data["hysteria_auth"],
+                                      "level": 0,
+                                      "email": "hysteria2",
+                                  }
+                              ],
+                          }, separators=(",", ":")),
+                          "stream_settings": json.dumps({
+                              "network": "hysteria",
+                              "security": "tls",
+                              "tlsSettings": tls_settings(env["XUI_CERT_FILE"], env["XUI_KEY_FILE"], env["XUI_TLS_DOMAIN"]),
+                              "hysteriaSettings": {
+                                  "version": 2,
+                                  "auth": data["hysteria_auth"],
+                                  "udpIdleTimeout": 60,
+                                  "masquerade": {
+                                      "type": "proxy",
+                                      "url": env["XUI_HYSTERIA_MASQUERADE"],
+                                      "rewriteHost": True,
+                                      "insecure": False,
+                                  },
+                              },
+                          }, separators=(",", ":")),
+                          "sniffing": json.dumps(sniffing(), separators=(",", ":")),
+                      },
+                  ]
+
+                  validate_inbound_payloads(inbounds)
+
+                  for inbound in inbounds:
+                      upsert_inbound(conn, inbound)
+
+          if __name__ == "__main__":
+              main()
+      when: xui_manage_inbounds | bool
+
+    - name: configure 3x-ui inbounds
+      ansible.builtin.command: /usr/local/sbin/configure-3x-ui-inbounds.py
+      environment:
+        XUI_TLS_DOMAIN: "{{ xui_tls_domain }}"
+        XUI_CERT_FILE: "{{ xui_cert_file }}"
+        XUI_KEY_FILE: "{{ xui_key_file }}"
+        XUI_SUBSCRIPTION_PORT: "{{ xui_subscription_port | string }}"
+        XUI_SUBSCRIPTION_PATH: "{{ xui_subscription_path }}"
+        XUI_CLASH_SUBSCRIPTION_PATH: "{{ xui_clash_subscription_path }}"
+        XUI_REALITY_PORT: "{{ xui_reality_port | string }}"
+        XUI_REALITY_TARGET: "{{ xui_reality_target }}"
+        XUI_REALITY_SERVER_NAME: "{{ xui_reality_server_name }}"
+        XUI_XHTTP_PORT: "{{ xui_xhttp_port | string }}"
+        XUI_XHTTP_PATH: "{{ xui_xhttp_path }}"
+        XUI_HYSTERIA_PORT: "{{ xui_hysteria_port | string }}"
+        XUI_HYSTERIA_MASQUERADE: "{{ xui_hysteria_masquerade }}"
+      changed_when: true
+      notify: restart x-ui
+      when: xui_manage_inbounds | bool
+
+    - name: apply service and sysctl handlers before firewall
+      ansible.builtin.meta: flush_handlers
+
+    - name: enable ufw after services and rules are ready
+      ansible.builtin.command: ufw --force enable
+      register: ufw_enable
+      changed_when: "'Firewall is active and enabled' in ufw_enable.stdout"
+      when: enable_ufw | bool
+
+    - name: reset ssh connection after firewall activation
+      ansible.builtin.meta: reset_connection
+      when: enable_ufw | bool
+
+    - name: verify ansible can still connect after firewall activation
+      ansible.builtin.wait_for_connection:
+        timeout: 30
+        delay: 2
+      when: enable_ufw | bool
+
+    - name: install fail2ban after ssh and firewall are verified
+      ansible.builtin.package:
+        name: fail2ban
+        state: present
+      when: enable_fail2ban | bool
+
+    - name: ensure fail2ban is enabled after firewall verification
+      ansible.builtin.service:
+        name: fail2ban
+        enabled: true
+        state: started
+      when: enable_fail2ban | bool
+
+    - name: ensure 3x-ui fail2ban integration
+      ansible.builtin.command: /usr/bin/x-ui setup-fail2ban
+      register: xui_fail2ban
+      changed_when: "'complete' in (xui_fail2ban.stdout | lower)"
+      failed_when: false
+      when: enable_fail2ban | bool
+
+    - name: check sshd drop-in directory
+      ansible.builtin.stat:
+        path: /etc/ssh/sshd_config.d
+      register: sshd_config_d
+      when: disable_root_ssh | bool
+
+    - name: disable root ssh login via drop-in
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-no-root-login.conf
+        content: |
+          PermitRootLogin no
+        owner: root
+        group: root
+        mode: '0644'
+      when:
+        - disable_root_ssh | bool
+        - sshd_config_d.stat.isdir | default(false)
+      notify: restart ssh
+
+    - name: disable root ssh login in main config
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^\s*#?\s*PermitRootLogin\s+'
+        line: PermitRootLogin no
+        validate: '/usr/sbin/sshd -t -f %s'
+      when:
+        - disable_root_ssh | bool
+        - not (sshd_config_d.stat.isdir | default(false))
+      notify: restart ssh
+
+    - name: apply final ssh lockdown
+      ansible.builtin.meta: flush_handlers
+      when: disable_root_ssh | bool
+
+    - name: show 3x-ui api token
+      ansible.builtin.debug:
+        msg: |
+          3x-ui API token for {{ inventory_hostname }}:
+          {{ xui_api_token.stdout }}
+
+  handlers:
+    - name: reload sysctl
+      ansible.builtin.command: sysctl --system
+
+    - name: validate sshd
+      ansible.builtin.command: /usr/sbin/sshd -t
+      changed_when: false
+      listen: restart ssh
+
+    - name: restart ssh service
+      ansible.builtin.service:
+        name: "{{ ssh_service_name }}"
+        state: restarted
+      listen: restart ssh
+
+    - name: restart x-ui
+      ansible.builtin.service:
+        name: x-ui
+        enabled: true
+        state: restarted

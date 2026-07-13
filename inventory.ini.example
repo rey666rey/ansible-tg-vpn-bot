@@ -1,0 +1,20 @@
+[xui_servers]
+# First rollout connects as root. The playbook creates rey, verifies firewall
+# access, and disables root SSH only at the very end.
+server1 ansible_host=203.0.113.10 ansible_user=root ansible_port=22
+
+# Password auth variant:
+# server1 ansible_host=203.0.113.10 ansible_user=root ansible_port=22 ansible_password=YOUR_ROOT_PASSWORD
+
+# SSH key variant:
+# server1 ansible_host=203.0.113.10 ansible_user=root ansible_port=22 ansible_ssh_private_key_file=./rey_server_ed25519
+
+# After the first successful rollout, use the admin user for later runs:
+# server1 ansible_host=203.0.113.10 ansible_user=rey ansible_port=22 ansible_ssh_private_key_file=./rey_server_ed25519
+#
+# Or use the admin user's password:
+# server1 ansible_host=203.0.113.10 ansible_user=rey ansible_port=22 ansible_password=REY_PASSWORD
+
+[xui_servers:vars]
+ansible_become=true
+ansible_python_interpreter=/usr/bin/python3
