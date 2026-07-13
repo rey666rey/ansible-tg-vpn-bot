@@ -15,6 +15,9 @@ DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 class Server:
     id: int
     host: str
+    panel_host: str | None = None
+    subscription_host: str | None = None
+    panel_base_path: str | None = None
     xui_api_token_name: str | None = None
     xui_api_token: str | None = None
     xui_api_auth_header: str | None = None
@@ -43,6 +46,9 @@ class ServerRepository:
                 CREATE TABLE IF NOT EXISTS servers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     host TEXT NOT NULL UNIQUE,
+                    panel_host TEXT,
+                    subscription_host TEXT,
+                    panel_base_path TEXT,
                     xui_api_token_name TEXT,
                     xui_api_token TEXT,
                     xui_api_auth_header TEXT,
@@ -67,17 +73,60 @@ class ServerRepository:
             )
             self._ensure_columns(conn)
 
-    def add(self, host: str) -> tuple[Server, bool]:
+    def add(
+        self,
+        host: str,
+        panel_host: str | None = None,
+        subscription_host: str | None = None,
+        panel_base_path: str | None = None,
+    ) -> tuple[Server, bool]:
         normalized_host = normalize_server_host(host)
+        normalized_panel_host = normalize_server_host(panel_host) if panel_host else None
+        normalized_subscription_host = (
+            normalize_server_host(subscription_host) if subscription_host else normalized_host
+        )
+        normalized_panel_base_path = normalize_panel_base_path(panel_base_path)
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT OR IGNORE INTO servers(host) VALUES (?)",
-                (normalized_host,),
+                """
+                INSERT OR IGNORE INTO servers(
+                    host,
+                    panel_host,
+                    subscription_host,
+                    panel_base_path
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    normalized_host,
+                    normalized_panel_host,
+                    normalized_subscription_host,
+                    normalized_panel_base_path,
+                ),
             )
             created = cursor.rowcount > 0
+            if not created:
+                conn.execute(
+                    """
+                    UPDATE servers
+                    SET panel_host = COALESCE(?, panel_host),
+                        subscription_host = COALESCE(?, subscription_host, host),
+                        panel_base_path = COALESCE(?, panel_base_path),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE host = ?
+                    """,
+                    (
+                        normalized_panel_host,
+                        normalized_subscription_host,
+                        normalized_panel_base_path,
+                        normalized_host,
+                    ),
+                )
             row = conn.execute(
                 """
-                SELECT id, host, xui_api_token_name, xui_api_token, xui_api_auth_header
+                SELECT id, host, panel_host, subscription_host,
+                       panel_base_path, xui_api_token_name,
+                       xui_api_token, xui_api_auth_header
                 FROM servers
                 WHERE host = ?
                 """,
@@ -94,8 +143,16 @@ class ServerRepository:
         token_name: str | None,
         token: str,
         auth_header: str | None,
+        panel_host: str | None = None,
+        subscription_host: str | None = None,
+        panel_base_path: str | None = None,
     ) -> Server:
         normalized_host = normalize_server_host(host)
+        normalized_panel_host = normalize_server_host(panel_host) if panel_host else None
+        normalized_subscription_host = (
+            normalize_server_host(subscription_host) if subscription_host else None
+        )
+        normalized_panel_base_path = normalize_panel_base_path(panel_base_path)
         normalized_token_name = (token_name or "").strip() or None
         normalized_auth_header = (auth_header or "").strip() or None
         token = token.strip()
@@ -107,13 +164,19 @@ class ServerRepository:
                 """
                 INSERT INTO servers(
                     host,
+                    panel_host,
+                    subscription_host,
+                    panel_base_path,
                     xui_api_token_name,
                     xui_api_token,
                     xui_api_auth_header,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(host) DO UPDATE SET
+                    panel_host = COALESCE(excluded.panel_host, servers.panel_host),
+                    subscription_host = COALESCE(excluded.subscription_host, servers.subscription_host, servers.host),
+                    panel_base_path = COALESCE(excluded.panel_base_path, servers.panel_base_path),
                     xui_api_token_name = excluded.xui_api_token_name,
                     xui_api_token = excluded.xui_api_token,
                     xui_api_auth_header = excluded.xui_api_auth_header,
@@ -121,6 +184,9 @@ class ServerRepository:
                 """,
                 (
                     normalized_host,
+                    normalized_panel_host,
+                    normalized_subscription_host,
+                    normalized_panel_base_path,
                     normalized_token_name,
                     token,
                     normalized_auth_header,
@@ -128,7 +194,9 @@ class ServerRepository:
             )
             row = conn.execute(
                 """
-                SELECT id, host, xui_api_token_name, xui_api_token, xui_api_auth_header
+                SELECT id, host, panel_host, subscription_host,
+                       panel_base_path, xui_api_token_name,
+                       xui_api_token, xui_api_auth_header
                 FROM servers
                 WHERE host = ?
                 """,
@@ -148,7 +216,9 @@ class ServerRepository:
             if value.isdigit():
                 row = conn.execute(
                     """
-                    SELECT id, host, xui_api_token_name, xui_api_token, xui_api_auth_header
+                    SELECT id, host, panel_host, subscription_host,
+                           panel_base_path, xui_api_token_name,
+                           xui_api_token, xui_api_auth_header
                     FROM servers
                     WHERE id = ?
                     """,
@@ -161,11 +231,13 @@ class ServerRepository:
                     return None
                 row = conn.execute(
                     """
-                    SELECT id, host, xui_api_token_name, xui_api_token, xui_api_auth_header
+                    SELECT id, host, panel_host, subscription_host,
+                           panel_base_path, xui_api_token_name,
+                           xui_api_token, xui_api_auth_header
                     FROM servers
-                    WHERE host = ?
+                    WHERE host = ? OR panel_host = ? OR subscription_host = ?
                     """,
-                    (host,),
+                    (host, host, host),
                 ).fetchone()
 
         if row is None:
@@ -176,7 +248,9 @@ class ServerRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, host, xui_api_token_name, xui_api_token, xui_api_auth_header
+                SELECT id, host, panel_host, subscription_host,
+                       panel_base_path, xui_api_token_name,
+                       xui_api_token, xui_api_auth_header
                 FROM servers
                 ORDER BY id
                 """
@@ -262,6 +336,9 @@ class ServerRepository:
             "xui_api_token_name": "ALTER TABLE servers ADD COLUMN xui_api_token_name TEXT",
             "xui_api_token": "ALTER TABLE servers ADD COLUMN xui_api_token TEXT",
             "xui_api_auth_header": "ALTER TABLE servers ADD COLUMN xui_api_auth_header TEXT",
+            "panel_host": "ALTER TABLE servers ADD COLUMN panel_host TEXT",
+            "subscription_host": "ALTER TABLE servers ADD COLUMN subscription_host TEXT",
+            "panel_base_path": "ALTER TABLE servers ADD COLUMN panel_base_path TEXT",
             "updated_at": "ALTER TABLE servers ADD COLUMN updated_at TEXT",
         }
         for column, statement in migrations.items():
@@ -307,6 +384,9 @@ def _row_to_server(row: sqlite3.Row) -> Server:
     return Server(
         id=int(row["id"]),
         host=str(row["host"]),
+        panel_host=row["panel_host"],
+        subscription_host=row["subscription_host"],
+        panel_base_path=row["panel_base_path"],
         xui_api_token_name=row["xui_api_token_name"],
         xui_api_token=row["xui_api_token"],
         xui_api_auth_header=row["xui_api_auth_header"],
@@ -346,6 +426,20 @@ def normalize_server_host(value: str) -> str:
     if not _is_valid_domain(host):
         raise ValueError("это не похоже на ip или домен.")
     return host
+
+
+def normalize_panel_base_path(value: str | None) -> str | None:
+    path = (value or "").strip()
+    if not path:
+        return None
+    path = path.strip("/")
+    if not path:
+        return None
+    if "/" in path or not re.fullmatch(r"[A-Za-z0-9._~-]+", path):
+        raise ValueError("panel_base_path должен быть одним url-сегментом без slash.")
+    if path == "panel":
+        raise ValueError("panel_base_path не должен быть равен panel.")
+    return "/" + path
 
 
 def _is_valid_domain(host: str) -> bool:

@@ -26,19 +26,24 @@
     xui_version: v3.4.2
     xui_username: "{{ lookup('ansible.builtin.env', 'XUI_USERNAME') | default(admin_user, true) }}"
     xui_password: "{{ lookup('ansible.builtin.env', 'XUI_PASSWORD') }}"
-    xui_panel_port: 2053
-    xui_web_base_path: rey
+    xui_panel_port: "{{ lookup('ansible.builtin.env', 'XUI_PANEL_PORT') | default('24444', true) | int }}"
+    xui_panel_base_path_env: "{{ lookup('ansible.builtin.env', 'XUI_PANEL_BASE_PATH') | default('', true) }}"
+    xui_panel_base_path_generated: "{{ lookup('ansible.builtin.password', '/tmp/server-tg-bot-xui-panel-base-path-' ~ inventory_hostname ~ ' length=18 chars=ascii_lowercase,digits') }}"
+    xui_web_base_path: "{{ lookup('ansible.builtin.env', 'XUI_WEB_BASE_PATH') | default(xui_panel_base_path_env, true) | default(xui_panel_base_path_generated, true) | regex_replace('^/+', '') | regex_replace('/+$', '') }}"
     xui_api_token_name: "{{ lookup('ansible.builtin.env', 'XUI_API_TOKEN_NAME') | default('ansible', true) }}"
     xui_api_token_file: /etc/x-ui/ansible-api-token.env
-    xui_subscription_port: 2096
-    xui_subscription_path: /sub/
-    xui_clash_subscription_path: /clash/
+    xui_subscription_port: "{{ lookup('ansible.builtin.env', 'XUI_SUBSCRIPTION_PORT') | default('2096', true) | int }}"
+    xui_subscription_path: "{{ lookup('ansible.builtin.env', 'XUI_SUBSCRIPTION_PATH') | default('/subrey/', true) }}"
+    xui_clash_subscription_path: "{{ lookup('ansible.builtin.env', 'XUI_CLASH_SUBSCRIPTION_PATH') | default('/clashrey/', true) }}"
 
     # Required for xhttp+tls and hysteria2 TLS certificates.
     xui_tls_domain: "{{ lookup('ansible.builtin.env', 'XUI_TLS_DOMAIN') }}"
+    xui_panel_domain: "{{ lookup('ansible.builtin.env', 'XUI_PANEL_DOMAIN') | default(xui_tls_domain, true) }}"
     xui_acme_email: "{{ lookup('ansible.builtin.env', 'XUI_ACME_EMAIL') | default('', true) }}"
     xui_cert_file: "/root/cert/{{ xui_tls_domain }}/fullchain.pem"
     xui_key_file: "/root/cert/{{ xui_tls_domain }}/privkey.pem"
+    xui_panel_cert_file: "/root/cert/{{ xui_panel_domain }}/fullchain.pem"
+    xui_panel_key_file: "/root/cert/{{ xui_panel_domain }}/privkey.pem"
 
     xui_manage_inbounds: "{{ lookup('ansible.builtin.env', 'XUI_MANAGE_INBOUNDS') | default('true', true) }}"
     xui_reality_port: 8443
@@ -91,9 +96,12 @@
       ansible.builtin.assert:
         that:
           - xui_tls_domain | length > 0
+          - xui_panel_domain | length > 0
           - xui_tls_domain != 'vpn.example.com'
+          - xui_panel_domain != 'vpn.example.com'
           - not xui_tls_domain.endswith('.example.com')
-        fail_msg: "Set XUI_TLS_DOMAIN to a real domain that points to this server, not vpn.example.com."
+          - not xui_panel_domain.endswith('.example.com')
+        fail_msg: "Set XUI_TLS_DOMAIN and XUI_PANEL_DOMAIN to real domains that point to this server, not vpn.example.com."
       when: xui_manage_inbounds | bool
 
     - name: require sensitive values from environment
@@ -266,8 +274,8 @@
         XUI_PASSWORD: "{{ xui_password }}"
         XUI_PANEL_PORT: "{{ xui_panel_port | string }}"
         XUI_WEB_BASE_PATH: "{{ xui_web_base_path }}"
-        XUI_SSL_MODE: "{{ 'domain' if (xui_tls_domain | length > 0) else 'none' }}"
-        XUI_DOMAIN: "{{ xui_tls_domain }}"
+        XUI_SSL_MODE: "{{ 'domain' if (xui_panel_domain | length > 0) else 'none' }}"
+        XUI_DOMAIN: "{{ xui_panel_domain }}"
         XUI_ACME_EMAIL: "{{ xui_acme_email }}"
         XUI_DB_TYPE: sqlite
         XUI_ENABLE_FAIL2BAN: "false"
@@ -426,7 +434,6 @@
 
         chmod 600 "$key_file"
         chmod 644 "$cert_file"
-        /usr/local/x-ui/x-ui cert -webCert "$cert_file" -webCertKey "$key_file"
         systemctl restart x-ui
       args:
         executable: /bin/bash
@@ -447,6 +454,96 @@
       ansible.builtin.stat:
         path: "{{ xui_key_file }}"
       register: xui_key
+      when: xui_manage_inbounds | bool
+
+    - name: check 3x-ui panel tls certificate
+      ansible.builtin.stat:
+        path: "{{ xui_panel_cert_file }}"
+      register: xui_panel_cert
+      when: xui_manage_inbounds | bool
+
+    - name: check 3x-ui panel tls key
+      ansible.builtin.stat:
+        path: "{{ xui_panel_key_file }}"
+      register: xui_panel_key
+      when: xui_manage_inbounds | bool
+
+    - name: issue 3x-ui panel tls certificate when missing
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        domain="{{ xui_panel_domain }}"
+        cert_dir="/root/cert/${domain}"
+        cert_file="${cert_dir}/fullchain.pem"
+        key_file="${cert_dir}/privkey.pem"
+
+        if [ -s "$cert_file" ] && [ -s "$key_file" ]; then
+          exit 0
+        fi
+
+        if [ ! -x /root/.acme.sh/acme.sh ]; then
+          curl -s https://get.acme.sh | sh
+        fi
+
+        /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt --force
+        if [ -n "{{ xui_acme_email }}" ]; then
+          /root/.acme.sh/acme.sh --register-account -m "{{ xui_acme_email }}"
+        fi
+
+        rm -rf "$cert_dir"
+        mkdir -p "$cert_dir"
+        rm -rf "/root/.acme.sh/${domain}" "/root/.acme.sh/${domain}_ecc"
+
+        systemctl stop x-ui 2>/dev/null || true
+        /root/.acme.sh/acme.sh --issue -d "$domain" --standalone --httpport 80 --force
+        /root/.acme.sh/acme.sh --installcert --force -d "$domain" \
+          --key-file "$key_file" \
+          --fullchain-file "$cert_file" \
+          --reloadcmd "systemctl restart x-ui 2>/dev/null || true"
+
+        chmod 600 "$key_file"
+        chmod 644 "$cert_file"
+        systemctl restart x-ui
+      args:
+        executable: /bin/bash
+      register: xui_issue_panel_cert
+      changed_when: xui_issue_panel_cert.rc == 0
+      when:
+        - xui_manage_inbounds | bool
+        - not (xui_panel_cert.stat.exists | default(false))
+          or not (xui_panel_key.stat.exists | default(false))
+
+    - name: recheck 3x-ui panel tls certificate
+      ansible.builtin.stat:
+        path: "{{ xui_panel_cert_file }}"
+      register: xui_panel_cert
+      when: xui_manage_inbounds | bool
+
+    - name: recheck 3x-ui panel tls key
+      ansible.builtin.stat:
+        path: "{{ xui_panel_key_file }}"
+      register: xui_panel_key
+      when: xui_manage_inbounds | bool
+
+    - name: require panel tls certificate files
+      ansible.builtin.assert:
+        that:
+          - xui_panel_cert.stat.exists
+          - xui_panel_key.stat.exists
+        fail_msg: "Panel TLS certificate was not found. Check that {{ xui_panel_domain }} resolves to this server and external port 80/tcp is reachable."
+      when: xui_manage_inbounds | bool
+
+    - name: enforce 3x-ui panel tls certificate
+      ansible.builtin.command:
+        argv:
+          - /usr/local/x-ui/x-ui
+          - cert
+          - -webCert
+          - "{{ xui_panel_cert_file }}"
+          - -webCertKey
+          - "{{ xui_panel_key_file }}"
+      changed_when: true
+      notify: restart x-ui
       when: xui_manage_inbounds | bool
 
     - name: require tls certificate files for tls inbounds

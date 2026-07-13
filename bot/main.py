@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -33,7 +34,7 @@ if __package__ in {None, ""}:
         subscription_keyboard,
     )
     from bot.middlewares import OwnerOnlyMiddleware
-    from bot.rollout import RolloutRunner, parse_rollout_message
+    from bot.rollout import RolloutRunner, generate_secret_path, parse_rollout_message
     from bot.xui_client import XuiApiError, XuiClientService, parse_bulk_subscription_message
 else:
     from .config import load_settings
@@ -52,7 +53,7 @@ else:
         subscription_keyboard,
     )
     from .middlewares import OwnerOnlyMiddleware
-    from .rollout import RolloutRunner, parse_rollout_message
+    from .rollout import RolloutRunner, generate_secret_path, parse_rollout_message
     from .xui_client import XuiApiError, XuiClientService, parse_bulk_subscription_message
 
 
@@ -92,12 +93,14 @@ async def rollout_button(
         "💎 пришли ip и домен. если user/password не указаны, возьму admin_user "
         "и admin_user_password из .env:\n"
         "<code>ip=203.0.113.10\n"
-        "domain=fr.example.com</code>\n\n"
+        "domain=fi.reyreyrey.space\n"
+        "panel_domain=reyreyrey.space</code>\n\n"
         "или явно:\n"
         "<code>ip=203.0.113.10\n"
         "user=rey\n"
         "password=ssh-password\n"
-        "domain=fr.example.com</code>",
+        "domain=fi.reyreyrey.space\n"
+        "panel_domain=reyreyrey.space</code>",
         reply_markup=rollout_keyboard(),
     )
 
@@ -115,6 +118,7 @@ async def back_to_home(message: Message, state: FSMContext) -> None:
 async def servers_button(
     message: Message,
     server_repository: ServerRepository,
+    settings: Settings,
 ) -> None:
     servers = server_repository.list()
     if not servers:
@@ -127,8 +131,12 @@ async def servers_button(
     lines = ["🖥 серверы в базе:"]
     for server in servers:
         token = "🔐 token есть" if server.xui_api_token else "🕳 token нет"
+        panel_host = server.panel_host or server.host
+        subscription_host = server.subscription_host or server.host
+        panel_base_path = server.panel_base_path or settings.xui_panel_base_path or "/rey"
         lines.append(
-            f"{server.id}. <b>{html.escape(server.host)}</b> · {token}"
+            f"{server.id}. <b>{html.escape(subscription_host)}</b> · {token}\n"
+            f"   панель: <code>{html.escape(panel_host)}{html.escape(panel_base_path)}</code>"
         )
     await message.answer("\n".join(lines), reply_markup=main_keyboard())
 
@@ -209,7 +217,8 @@ async def subscription_button(
     await state.set_state(SubscriptionStates.waiting_payload)
     servers = server_repository.list()
     server_lines = "\n".join(
-        f"{server.id}. {html.escape(server.host)}" for server in servers
+        f"{server.id}. {html.escape(server.subscription_host or server.host)}"
+        for server in servers
     )
     servers_text = (
         f"\n\n🖥 серверы в базе:\n<code>{server_lines}</code>"
@@ -262,10 +271,26 @@ async def rollout_payload(
     except Exception:
         logging.info("Could not delete rollout payload message", exc_info=True)
 
+    existing_server = server_repository.get(request.domain)
+    panel_domain = request.panel_domain or settings.xui_panel_domain or request.domain
+    panel_base_path = (
+        request.panel_base_path
+        or (existing_server.panel_base_path if existing_server else None)
+        or settings.xui_panel_base_path
+        or generate_secret_path()
+    )
+    request = replace(
+        request,
+        panel_domain=panel_domain,
+        panel_base_path=panel_base_path,
+    )
+
     await state.clear()
     status_message = await message.answer(
         f"💎 начинаю раскатку <code>{html.escape(request.ip)}</code> "
-        f"для <code>{html.escape(request.domain)}</code> "
+        f"для сабок <code>{html.escape(request.domain)}</code> "
+        f"и панели <code>{html.escape(panel_domain)}</code> "
+        f"с secret path <code>{html.escape(panel_base_path)}</code>. "
         f"под <code>{html.escape(request.user)}</code>. "
         "отпишусь, когда ansible закончит.",
         reply_markup=main_keyboard(),
@@ -273,7 +298,12 @@ async def rollout_payload(
 
     result = await runner.run(request)
     if result.ok:
-        server, created = server_repository.add(request.domain)
+        server, created = server_repository.add(
+            request.domain,
+            panel_host=panel_domain,
+            subscription_host=request.domain,
+            panel_base_path=panel_base_path,
+        )
         token_saved = False
         if result.xui_api_token:
             server = server_repository.save_xui_api_token(
@@ -281,6 +311,9 @@ async def rollout_payload(
                 token_name=result.xui_api_token_name,
                 token=result.xui_api_token,
                 auth_header=result.xui_api_auth_header,
+                panel_host=panel_domain,
+                subscription_host=request.domain,
+                panel_base_path=panel_base_path,
             )
             token_saved = True
         server_status = "домен добавлен в базу." if created else "домен уже был в базе."
@@ -348,7 +381,7 @@ async def subscription_payload(
             continue
         server_repository.save_client(
             name=item.result.client_name,
-            server_host=item.server.host,
+            server_host=item.server.subscription_host or item.server.host,
             subscription_url=item.result.subscription_url,
             clash_subscription_url=item.result.clash_subscription_url,
         )

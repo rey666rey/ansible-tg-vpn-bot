@@ -61,7 +61,12 @@ ANSIBLE_HOST_KEY_CHECKING=False
 XUI_USERNAME=rey
 XUI_PASSWORD=XUI_PANEL_PASSWORD
 XUI_API_TOKEN_NAME=ansible
-XUI_TLS_DOMAIN=vpn.example.com
+XUI_TLS_DOMAIN=fi.reyreyrey.space
+XUI_PANEL_DOMAIN=reyreyrey.space
+XUI_PANEL_PORT=24444
+XUI_SUBSCRIPTION_PORT=2096
+XUI_SUBSCRIPTION_PATH=/subrey/
+XUI_CLASH_SUBSCRIPTION_PATH=/clashrey/
 XUI_ACME_EMAIL=mail@example.com
 XUI_MANAGE_INBOUNDS=true
 ```
@@ -203,7 +208,13 @@ SERVER_SSH_PRIVATE_KEY_FILE=./rey_server_ed25519
 | `XUI_USERNAME` | Логин панели 3x-ui. |
 | `XUI_PASSWORD` | Пароль панели 3x-ui. |
 | `XUI_API_TOKEN_NAME` | Имя API token в 3x-ui. По умолчанию `ansible`. |
-| `XUI_TLS_DOMAIN` | Домен для TLS-сертификатов и подписок. |
+| `XUI_TLS_DOMAIN` | Домен для TLS-сертификатов inbound-ов и подписок, например `fi.reyreyrey.space`. |
+| `XUI_PANEL_DOMAIN` | Домен панели, например `reyreyrey.space`. Если не задан, используется `XUI_TLS_DOMAIN`. |
+| `XUI_PANEL_PORT` | Порт панели и API 3x-ui. По умолчанию `24444`. |
+| `XUI_PANEL_BASE_PATH` | Обычно не нужен: Telegram-бот генерит случайный base path при первой раскатке и сохраняет его в sqlite. |
+| `XUI_SUBSCRIPTION_PORT` | Порт подписок. По умолчанию `2096`. |
+| `XUI_SUBSCRIPTION_PATH` | Путь обычной подписки. По умолчанию `/subrey/`. |
+| `XUI_CLASH_SUBSCRIPTION_PATH` | Путь Clash/Mihomo подписки. По умолчанию `/clashrey/`. |
 | `XUI_ACME_EMAIL` | Email для ACME/Let's Encrypt. Можно оставить пустым, но лучше указать. |
 | `XUI_MANAGE_INBOUNDS` | Создавать TLS inbound-ы и выпускать сертификат. По умолчанию `true`. |
 
@@ -213,9 +224,11 @@ SERVER_SSH_PRIVATE_KEY_FILE=./rey_server_ed25519
 
 | Переменная | Значение |
 | --- | --- |
-| `xui_panel_port` | `2053` |
-| `xui_web_base_path` | `rey` |
+| `xui_panel_port` | `24444` |
+| `xui_web_base_path` | генерируется ботом при раскатке |
 | `xui_subscription_port` | `2096` |
+| `xui_subscription_path` | `/subrey/` |
+| `xui_clash_subscription_path` | `/clashrey/` |
 | `xui_reality_port` | `8443` |
 | `xui_xhttp_port` | `443` |
 | `xui_hysteria_port` | `443/udp` |
@@ -226,7 +239,7 @@ Playbook открывает в UFW:
 
 - `22/tcp` для SSH;
 - `80/tcp` для ACME/сертификатов;
-- `2053/tcp` для панели и API 3x-ui, чтобы Telegram-бот мог создавать клиентов;
+- `24444/tcp` для панели и API 3x-ui, чтобы Telegram-бот мог создавать клиентов;
 - `2096/tcp` для подписок;
 - `8443/tcp` для VLESS Reality;
 - `443/tcp` для VLESS XHTTP TLS;
@@ -256,8 +269,28 @@ sudo systemctl status x-ui
 
 ```bash
 curl -H "Authorization: Bearer XUI_API_TOKEN" \
-  http://vpn.example.com:2053/rey/panel/api/server/status
+  https://reyreyrey.space:24444/<generated-panel-path>/panel/api/server/status
 ```
+
+Итоговый вид ссылок:
+
+```text
+https://reyreyrey.space:24444/<generated-panel-path>/panel/
+https://fi.reyreyrey.space:2096/subrey/<random-sub-id>
+https://fi.reyreyrey.space:2096/clashrey/<random-sub-id>
+```
+
+При раскатке через Telegram-бота можно прислать:
+
+```text
+ip=203.0.113.10
+domain=fi.reyreyrey.space
+panel_domain=reyreyrey.space
+```
+
+Если хочешь именно автогенерацию secret path панели, не задавай
+`XUI_PANEL_BASE_PATH` в `.env`. Если переменная задана, бот будет использовать ее
+как ручной override.
 
 Проверить Fail2Ban:
 

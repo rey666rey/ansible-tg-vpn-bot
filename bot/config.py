@@ -15,6 +15,7 @@ class Settings:
     rollout_timeout_seconds: int
     database_path: Path
     xui_panel_scheme: str
+    xui_panel_domain: str
     xui_panel_port: int
     xui_panel_base_path: str
     xui_subscription_port: int
@@ -62,11 +63,12 @@ def load_settings() -> Settings:
     timeout = int(os.getenv("ROLLOUT_TIMEOUT_SECONDS", "3600"))
     database_path = _project_path(os.getenv("SQLITE_DB_PATH", "data/bot.sqlite3"))
     panel_scheme = os.getenv("XUI_PANEL_SCHEME", "https").strip().lower()
-    panel_port = int(os.getenv("XUI_PANEL_PORT", "2053"))
-    panel_base_path = os.getenv("XUI_PANEL_BASE_PATH", "/rey").strip()
+    panel_domain = os.getenv("XUI_PANEL_DOMAIN", "").strip().lower()
+    panel_port = int(os.getenv("XUI_PANEL_PORT", "24444"))
+    panel_base_path = os.getenv("XUI_PANEL_BASE_PATH", "").strip()
     subscription_port = int(os.getenv("XUI_SUBSCRIPTION_PORT", "2096"))
-    subscription_path = os.getenv("XUI_SUBSCRIPTION_PATH", "/sub/").strip()
-    clash_subscription_path = os.getenv("XUI_CLASH_SUBSCRIPTION_PATH", "/clash/").strip()
+    subscription_path = os.getenv("XUI_SUBSCRIPTION_PATH", "/subrey/").strip()
+    clash_subscription_path = os.getenv("XUI_CLASH_SUBSCRIPTION_PATH", "/clashrey/").strip()
     api_token = os.getenv("XUI_API_TOKEN", "").strip()
     if api_token == "PASTE_3X_UI_API_TOKEN_HERE":
         api_token = ""
@@ -81,6 +83,7 @@ def load_settings() -> Settings:
         rollout_timeout_seconds=timeout,
         database_path=database_path,
         xui_panel_scheme=panel_scheme,
+        xui_panel_domain=panel_domain,
         xui_panel_port=panel_port,
         xui_panel_base_path=panel_base_path,
         xui_subscription_port=subscription_port,

@@ -81,6 +81,7 @@ class XuiBulkSubscriptionRequest:
 @dataclass(frozen=True)
 class XuiSubscriptionResult:
     client_name: str
+    sub_id: str
     subscription_url: str
     clash_subscription_url: str
     created: bool
@@ -296,8 +297,15 @@ class XuiClientService:
         self,
         request: XuiSubscriptionRequest,
     ) -> XuiSubscriptionResult:
+        server = self._resolve_server_record(request.server_ref)
         panel_url = self._resolve_panel_url(request.server_ref)
-        return self._subscription_result(panel_url, request, created=False, inbound_ids=())
+        return self._subscription_result(
+            panel_url,
+            request,
+            created=False,
+            inbound_ids=(),
+            server=server,
+        )
 
     async def ensure_client_subscription(
         self,
@@ -325,6 +333,7 @@ class XuiClientService:
         if not inbound_ids:
             raise XuiApiError("задай xui_inbound_ids в .env.")
 
+        sub_id = _generate_sub_id()
         add_request = XuiAddClientRequest(
             server_ref=request.server_ref,
             api_token=api_token,
@@ -340,7 +349,7 @@ class XuiClientService:
             tg_id=request.tg_id,
             comment=request.comment,
             tls_verify=request.tls_verify,
-            sub_id=request.client_name,
+            sub_id=sub_id,
         )
 
         try:
@@ -348,11 +357,30 @@ class XuiClientService:
         except XuiApiError as exc:
             if not _looks_like_existing_client(str(exc)):
                 raise
+            existing_sub_id = await self._find_client_sub_id(
+                panel_url=panel_url,
+                api_token=api_token,
+                client_name=request.client_name,
+                tls_verify=request.tls_verify,
+            )
+            if not existing_sub_id:
+                raise XuiApiError(
+                    "клиент уже есть, но не смог найти его subId в 3x-ui. "
+                    "удали клиента в панели и создай заново через бота."
+                ) from exc
+            if existing_sub_id == request.client_name:
+                raise XuiApiError(
+                    "клиент уже есть со старым открытым subId, который совпадает с именем. "
+                    "удали этого клиента в панели и создай заново через бота, "
+                    "чтобы получить рандомную кракозябру в ссылке."
+                ) from exc
             return self._subscription_result(
                 panel_url,
                 request,
                 created=False,
                 inbound_ids=inbound_ids,
+                server=server,
+                sub_id=existing_sub_id,
             )
 
         return self._subscription_result(
@@ -360,6 +388,8 @@ class XuiClientService:
             request,
             created=True,
             inbound_ids=inbound_ids,
+            server=server,
+            sub_id=sub_id,
         )
 
     async def ensure_client_subscription_on_all_servers(
@@ -500,6 +530,44 @@ class XuiClientService:
 
         return _validate_mihomo_subscription_text(text)
 
+    async def _find_client_sub_id(
+        self,
+        panel_url: str,
+        api_token: str,
+        client_name: str,
+        tls_verify: bool,
+    ) -> str | None:
+        response = await asyncio.to_thread(
+            self._get_json_with_scheme_fallback,
+            _api_url(panel_url, "/panel/api/inbounds/list"),
+            api_token,
+            tls_verify,
+        )
+        if not response.get("success", False):
+            return None
+
+        rows = response.get("obj")
+        if not isinstance(rows, list):
+            return None
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            settings = _loads_json_object(row.get("settings"))
+            clients = settings.get("clients")
+            if not isinstance(clients, list):
+                continue
+            for client in clients:
+                if not isinstance(client, dict):
+                    continue
+                email = str(client.get("email") or "").strip()
+                if email != client_name:
+                    continue
+                sub_id = str(client.get("subId") or "").strip()
+                return sub_id or None
+
+        return None
+
     async def _resolve_inbound_ids(
         self,
         panel_url: str,
@@ -554,7 +622,7 @@ class XuiClientService:
 
     async def add_client(self, request: XuiAddClientRequest) -> XuiAddClientResult:
         panel_url = self._resolve_panel_url(request.server_ref)
-        sub_id = request.sub_id or secrets.token_urlsafe(8)
+        sub_id = request.sub_id or _generate_sub_id()
         payload = {
             "client": {
                 "id": str(uuid.uuid4()),
@@ -609,22 +677,27 @@ class XuiClientService:
         request: XuiSubscriptionRequest,
         created: bool,
         inbound_ids: tuple[int, ...],
+        server: Server | None = None,
+        sub_id: str | None = None,
     ) -> XuiSubscriptionResult:
+        resolved_sub_id = sub_id or request.client_name
         sub_base_url = request.sub_base_url or _default_sub_base_url(
             panel_url,
             self.settings.xui_subscription_port,
+            host=server.subscription_host if server else None,
         )
         return XuiSubscriptionResult(
             client_name=request.client_name,
+            sub_id=resolved_sub_id,
             subscription_url=_subscription_url(
                 sub_base_url,
                 request.sub_path or self.settings.xui_subscription_path,
-                request.client_name,
+                resolved_sub_id,
             ),
             clash_subscription_url=_subscription_url(
                 sub_base_url,
                 request.clash_path or self.settings.xui_clash_subscription_path,
-                request.client_name,
+                resolved_sub_id,
             ),
             created=created,
             inbound_ids=inbound_ids,
@@ -775,13 +848,13 @@ class XuiClientService:
             except ValueError as exc:
                 raise XuiApiError("сервер не найден в базе.") from exc
         else:
-            host = server.host
+            host = server.panel_host or self.settings.xui_panel_domain or server.host
 
         return _build_panel_url(
             scheme=self.settings.xui_panel_scheme,
             host=host,
             port=self.settings.xui_panel_port,
-            base_path=self.settings.xui_panel_base_path,
+            base_path=server.panel_base_path or self.settings.xui_panel_base_path or "rey",
         )
 
     def _resolve_server_record(self, server_ref: str) -> Server | None:
@@ -876,6 +949,23 @@ def _expiry_time_ms(days: int) -> int:
     return int((time.time() + days * 86400) * 1000)
 
 
+def _generate_sub_id(length: int = 18) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _loads_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _api_url(panel_url: str, api_path: str) -> str:
     base = panel_url.rstrip("/") + "/"
     return urljoin(base, api_path.lstrip("/"))
@@ -912,12 +1002,12 @@ def _build_panel_url(scheme: str, host: str, port: int, base_path: str) -> str:
     return urlunparse(ParseResult(scheme, f"{netloc_host}:{port}", path, "", "", ""))
 
 
-def _default_sub_base_url(panel_url: str, port: int) -> str:
+def _default_sub_base_url(panel_url: str, port: int, host: str | None = None) -> str:
     parsed = urlparse(panel_url)
-    host = parsed.hostname or parsed.netloc
-    if parsed.hostname and ":" in parsed.hostname:
-        host = f"[{parsed.hostname}]"
-    netloc = f"{host}:{port}"
+    sub_host = host or parsed.hostname or parsed.netloc
+    if ":" in sub_host and not sub_host.startswith("["):
+        sub_host = f"[{sub_host}]"
+    netloc = f"{sub_host}:{port}"
     return urlunparse(ParseResult(parsed.scheme, netloc, "", "", "", ""))
 
 

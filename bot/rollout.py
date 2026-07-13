@@ -5,12 +5,14 @@ import ipaddress
 import json
 import os
 import re
+import secrets
+import string
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
-from .database import normalize_server_host
+from .database import normalize_panel_base_path, normalize_server_host
 
 
 @dataclass(frozen=True)
@@ -19,6 +21,8 @@ class RolloutRequest:
     user: str
     password: str
     domain: str
+    panel_domain: str | None = None
+    panel_base_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,15 @@ def parse_rollout_message(
         key, value = line.split("=", 1)
         key = key.strip().upper()
         value = value.strip()
-        if key in {"IP", "USER", "PASSWORD", "DOMAIN"}:
+        if key in {
+            "IP",
+            "USER",
+            "PASSWORD",
+            "DOMAIN",
+            "PANEL_DOMAIN",
+            "PANEL_HOST",
+            "PANEL_BASE_PATH",
+        }:
             values[key] = value
 
     ip = values.get("IP", "")
@@ -57,6 +69,8 @@ def parse_rollout_message(
     user = values.get("USER", "")
     password = values.get("PASSWORD", "")
     domain = values.get("DOMAIN", "")
+    panel_domain = values.get("PANEL_DOMAIN") or values.get("PANEL_HOST") or ""
+    panel_base_path = values.get("PANEL_BASE_PATH") or ""
 
     if explicit_user != explicit_password:
         raise ValueError("user и password нужно указывать вместе или не указывать оба.")
@@ -83,7 +97,25 @@ def parse_rollout_message(
     except ValueError as exc:
         raise ValueError("domain выглядит некорректно.") from exc
 
-    return RolloutRequest(ip=ip, user=user, password=password, domain=domain)
+    if panel_domain:
+        try:
+            panel_domain = normalize_server_host(panel_domain)
+        except ValueError as exc:
+            raise ValueError("panel_domain выглядит некорректно.") from exc
+
+    return RolloutRequest(
+        ip=ip,
+        user=user,
+        password=password,
+        domain=domain,
+        panel_domain=panel_domain or None,
+        panel_base_path=normalize_panel_base_path(panel_base_path),
+    )
+
+
+def generate_secret_path(length: int = 18) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "/" + "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 class RolloutRunner:
@@ -136,6 +168,12 @@ class RolloutRunner:
                 env["ANSIBLE_LOCAL_TEMP"] = "/tmp/ansible-local"
             env.setdefault("ANSIBLE_HOST_KEY_CHECKING", "False")
             env["XUI_TLS_DOMAIN"] = request.domain
+            if request.panel_domain:
+                env["XUI_PANEL_DOMAIN"] = request.panel_domain
+            else:
+                env.setdefault("XUI_PANEL_DOMAIN", request.domain)
+            if request.panel_base_path:
+                env["XUI_PANEL_BASE_PATH"] = request.panel_base_path
 
             proc = await asyncio.create_subprocess_exec(
                 "ansible-playbook",
