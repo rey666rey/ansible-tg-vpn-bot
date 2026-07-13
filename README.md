@@ -460,6 +460,27 @@ ANSIBLE_HOST_KEY_CHECKING=False
 ssh-keyscan -H 203.0.113.10 >> ~/.ssh/known_hosts
 ```
 
+### Invalid/incorrect password или Permission denied
+
+SSH не пустил Ansible на сервер. Обычно это одно из трех:
+
+- после reinstall VPS нужен новый root-пароль от провайдера;
+- указан не тот `USER`: для свежего сервера чаще всего нужен `user=root`;
+- сервер уже был раскатан раньше, root SSH отключен, и надо заходить под `ADMIN_USER`.
+
+Для свежего reinstall через Telegram-бота отправь:
+
+```text
+ip=203.0.113.10
+user=root
+password=NEW_ROOT_PASSWORD
+domain=fi.reyreyrey.space
+panel_domain=reyreyrey.space
+```
+
+Если в боте уже был старый сервер, сначала нажми `🧨 удалить сервер`, чтобы
+убрать старый xui token и локальные записи из sqlite.
+
 ### Unable to create local directories(/private/tmp/ansible-local)
 
 Это macos-путь, который не подходит для ubuntu. В `.env` убери старую строку

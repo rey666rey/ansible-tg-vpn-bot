@@ -350,7 +350,8 @@ async def rollout_payload(
         f"и панели <code>{html.escape(panel_domain)}</code> "
         f"с secret path <code>{html.escape(panel_base_path)}</code>. "
         f"под <code>{html.escape(request.user)}</code>. "
-        "отпишусь, когда ansible закончит.",
+        "отпишусь, когда ansible закончит. "
+        "если это свежий reinstall, обычно нужен user=root и новый root password.",
         reply_markup=main_keyboard(),
     )
 
@@ -389,8 +390,14 @@ async def rollout_payload(
 
     details = result.stderr_tail or result.stdout_tail or "ansible не вернул вывод."
     details = html.escape(details)
+    hint = (
+        f"\n💡 <b>похоже:</b> {html.escape(result.hint)}\n"
+        if result.hint
+        else "\n"
+    )
     await status_message.answer(
-        "🚨 раскатка упала.\n"
+        "🚨 раскатка упала."
+        f"{hint}"
         f"код: <code>{result.returncode}</code>\n"
         f"<pre>{details}</pre>"
     )

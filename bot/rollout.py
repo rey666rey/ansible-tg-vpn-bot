@@ -31,6 +31,7 @@ class RolloutResult:
     returncode: int | None
     stdout_tail: str
     stderr_tail: str
+    hint: str | None = None
     xui_api_token_name: str | None = None
     xui_api_token: str | None = None
     xui_api_auth_header: str | None = None
@@ -199,13 +200,17 @@ class RolloutRunner:
                     returncode=None,
                     stdout_tail=_tail(stdout_raw),
                     stderr_tail="раскатка остановлена по таймауту.",
+                    hint="ansible не успел закончить за отведенное время.",
                 )
 
+            stdout_tail = _tail(stdout_raw)
+            stderr_tail = _tail(stderr_raw)
             return RolloutResult(
                 ok=proc.returncode == 0,
                 returncode=proc.returncode,
-                stdout_tail=_tail(stdout_raw),
-                stderr_tail=_tail(stderr_raw),
+                stdout_tail=stdout_tail,
+                stderr_tail=stderr_tail,
+                hint=classify_rollout_failure(stdout_tail, stderr_tail),
                 **parse_xui_api_token(stdout_raw),
             )
 
@@ -215,6 +220,33 @@ def _tail(raw: bytes, limit: int = 3500) -> str:
     if len(text) <= limit:
         return text
     return text[-limit:]
+
+
+def classify_rollout_failure(stdout_tail: str, stderr_tail: str) -> str | None:
+    text = f"{stdout_tail}\n{stderr_tail}".lower()
+    if "invalid/incorrect password" in text or "permission denied" in text:
+        return (
+            "ssh не пустил на сервер: неверный user/password или root-login уже отключен. "
+            "после reinstall обычно нужно указать user=root и новый root password от провайдера."
+        )
+    if "remote host identification has changed" in text or "offending" in text and "known_hosts" in text:
+        return (
+            "ssh host key изменился. такое нормально после reinstall vps. "
+            "удали старый ключ командой ssh-keygen -R <ip> на машине, где крутится бот, "
+            "или зайди в боте в 🧨 удалить сервер и раскатай заново."
+        )
+    if "using a ssh password instead of a key is not possible" in text:
+        return (
+            "ansible не может идти по паролю при включенной проверке host key. "
+            "для первого входа поставь ANSIBLE_HOST_KEY_CHECKING=False или используй ssh-ключ."
+        )
+    if "no such file or directory" in text and "ansible-playbook" in text:
+        return "на машине с ботом не установлен ansible-playbook."
+    if "sshpass" in text and ("not found" in text or "to use the 'ssh' connection type with passwords" in text):
+        return "для ssh-пароля на машине с ботом нужен пакет sshpass."
+    if "connection timed out" in text or "operation timed out" in text:
+        return "сервер недоступен по ssh: проверь ip, порт 22, firewall/security group и что vps уже загрузился."
+    return None
 
 
 def parse_xui_api_token(raw: bytes | str) -> dict[str, str | None]:
