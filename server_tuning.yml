@@ -1100,7 +1100,15 @@
                   return ""
               return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:])
 
-          def reality_self_test(db_rows):
+          def first_enabled_client(settings):
+              items = settings.get("clients")
+              if not isinstance(items, list) or not items:
+                  items = settings.get("users")
+              if not isinstance(items, list) or not items:
+                  return None
+              return next((item for item in items if item.get("enable", True)), items[0])
+
+          def reality_self_test(db_rows, runtime_rows):
               if os.environ.get("XUI_REALITY_SELF_TEST", "true").strip().lower() in {"0", "false", "no", "off"}:
                   print("reality self-test skipped by XUI_REALITY_SELF_TEST=false")
                   return
@@ -1108,19 +1116,22 @@
               if not xray_path.exists():
                   raise RuntimeError(f"{xray_path} was not found")
 
-              row = db_rows.get("in-vless-reality-8443")
-              if not row:
+              db_row = db_rows.get("in-vless-reality-8443")
+              runtime_row = runtime_rows.get("in-vless-reality-8443")
+              if not db_row:
                   raise RuntimeError("reality inbound is missing in sqlite")
+              if not runtime_row:
+                  raise RuntimeError("reality inbound is missing in runtime config")
 
-              settings = row["settings"]
-              stream = row["stream_settings"]
-              clients = settings.get("clients")
-              if not isinstance(clients, list) or not clients:
-                  raise RuntimeError("reality inbound has no clients")
-              client = next((item for item in clients if item.get("enable", True)), clients[0])
+              runtime_settings = runtime_row.get("settings") or {}
+              runtime_stream = runtime_row.get("streamSettings") or {}
+              client = first_enabled_client(runtime_settings)
+              if not client:
+                  raise RuntimeError("reality runtime inbound has no clients")
 
-              reality = stream.get("realitySettings") or {}
-              reality_client = reality.get("settings") or {}
+              reality = runtime_stream.get("realitySettings") or {}
+              db_reality = db_row["stream_settings"].get("realitySettings") or {}
+              reality_client = db_reality.get("settings") or {}
               server_names = reality.get("serverNames") or []
               short_ids = reality.get("shortIds") or []
               if not server_names or not short_ids or not reality_client.get("publicKey"):
@@ -1144,7 +1155,7 @@
                           "protocol": "vless",
                           "settings": {
                               "address": "127.0.0.1",
-                              "port": int(row["port"]),
+                              "port": int(runtime_row["port"]),
                               "id": client["id"],
                               "encryption": "none",
                               "flow": client.get("flow") or "xtls-rprx-vision",
@@ -1214,7 +1225,7 @@
               db_rows = load_db_inbounds()
               runtime_rows = load_runtime_inbounds()
               assert_runtime_matches_db(db_rows, runtime_rows)
-              reality_self_test(db_rows)
+              reality_self_test(db_rows, runtime_rows)
               print("3x-ui inbound runtime check passed")
 
           if __name__ == "__main__":
