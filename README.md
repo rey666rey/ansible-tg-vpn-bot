@@ -99,6 +99,18 @@ chmod 600 rey_server_ed25519
 chmod 700 run-playbook.sh
 ```
 
+Для запуска через systemd удобнее положить публичный ключ прямо в `.env`:
+
+```bash
+ADMIN_SSH_PUBLIC_KEY='ssh-ed25519 AAAA... your-key-comment'
+```
+
+или указать путь к файлу:
+
+```bash
+ADMIN_SSH_PUBLIC_KEY_FILE=/opt/server-tg-bot/rey_server_ed25519.pub
+```
+
 5. Запусти playbook:
 
 ```bash

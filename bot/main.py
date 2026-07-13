@@ -310,6 +310,7 @@ async def subscription_payload(
     message: Message,
     state: FSMContext,
     xui_client_service: XuiClientService,
+    server_repository: ServerRepository,
 ) -> None:
     if message.text in {BACK_BUTTON, "назад"}:
         await back_to_home(message, state)

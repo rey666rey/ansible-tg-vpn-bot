@@ -12,7 +12,8 @@
     admin_user_password_hash: "{{ admin_user_password_hash_override if (admin_user_password_hash_override | length > 0) else (admin_user_password | password_hash('sha512', admin_user_password_salt)) }}"
     admin_user_shell: /bin/bash
     admin_user_home: "/home/{{ admin_user }}"
-    admin_user_ssh_public_key_file: "{{ playbook_dir }}/rey_server_ed25519.pub"
+    admin_user_ssh_public_key: "{{ lookup('ansible.builtin.env', 'ADMIN_SSH_PUBLIC_KEY') | default('', true) }}"
+    admin_user_ssh_public_key_file: "{{ lookup('ansible.builtin.env', 'ADMIN_SSH_PUBLIC_KEY_FILE') | default(playbook_dir ~ '/rey_server_ed25519.pub', true) }}"
     ssh_port: 22
     ssh_service_name: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
     sudo_group: "{{ 'sudo' if ansible_facts['os_family'] == 'Debian' else 'wheel' }}"
@@ -102,6 +103,12 @@
           - xui_password | length > 0
         fail_msg: "Load .env first and set ADMIN_USER_PASSWORD or ADMIN_USER_PASSWORD_HASH, plus XUI_PASSWORD."
 
+    - name: require admin ssh public key
+      ansible.builtin.assert:
+        that:
+          - (admin_user_ssh_public_key | length > 0) or (admin_user_ssh_public_key_file is file)
+        fail_msg: "Set ADMIN_SSH_PUBLIC_KEY in .env or put a public key file at ADMIN_SSH_PUBLIC_KEY_FILE / {{ admin_user_ssh_public_key_file }}."
+
     - name: update apt cache
       ansible.builtin.apt:
         update_cache: true
@@ -133,7 +140,7 @@
     - name: authorize admin ssh public key
       ansible.builtin.lineinfile:
         path: "{{ admin_user_home }}/.ssh/authorized_keys"
-        line: "{{ lookup('ansible.builtin.file', admin_user_ssh_public_key_file) }}"
+        line: "{{ admin_user_ssh_public_key if (admin_user_ssh_public_key | length > 0) else lookup('ansible.builtin.file', admin_user_ssh_public_key_file) }}"
         create: true
         owner: "{{ admin_user }}"
         mode: '0600'
